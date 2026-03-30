@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: #0A0F1A;
+  color: #fff;
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+  overscroll-behavior: none;
+}
+
+/* Prevent pull-to-refresh on mobile */
+body {
+  overflow: hidden;
+}
+
+/* Leaflet map */
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+}
+
+/* Hide Leaflet attribution for cleaner UI (keep for compliance if needed) */
+.leaflet-control-attribution {
+  font-size: 9px;
+  opacity: 0.5;
+}
+
+/* Scrollable content areas */
+.scroll-area {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  height: 100%;
+}
