@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import RouteMap from '../components/RouteMap'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
 
@@ -273,20 +274,11 @@ export default function DriverApp() {
             </div>
           </div>
 
-          {/* Map placeholder — replace with real Leaflet map component */}
-          <div style={{ background: '#131A26', borderRadius: 14, border: '1px solid rgba(255,255,255,0.07)', height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.3)' }}>
-              {assignment?.routes?.geojson ? '— Live map renders here —' : '— No route GeoJSON loaded yet —'}
-            </div>
-            {pos && (
-              <div style={{ fontSize: 10, color: '#22C55E', fontFamily: 'monospace' }}>
-                GPS: {pos.lat.toFixed(5)}, {pos.lng.toFixed(5)}
-              </div>
-            )}
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', fontFamily: 'monospace', textAlign: 'center', padding: '0 16px' }}>
-              Connect Leaflet map to assignment.routes.geojson to render the route
-            </div>
-          </div>
+          <RouteMap
+  geojson={assignment?.routes?.geojson}
+  gpsPos={pos}
+  sweptCoords={gpsTrackRef.current.map(p => [p.lat, p.lng])}
+/>
 
           {/* Progress */}
           {jobActive && (

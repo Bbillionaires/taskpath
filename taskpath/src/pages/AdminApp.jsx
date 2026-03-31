@@ -1,3 +1,4 @@
+import { supabaseAdmin } from '../lib/supabaseAdmin'
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
@@ -257,7 +258,7 @@ function DriversTab() {
 
   async function createDriver() {
     setSaving(true)
-    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email: form.email, password: form.password, email_confirm: true,
     })
     if (authError) { setMsg({ type: 'error', text: authError.message }); setSaving(false); return }
