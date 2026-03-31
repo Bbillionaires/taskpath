@@ -96,7 +96,7 @@ export default function DriverApp() {
       .select(`
         *,
         routes (id, name, description, geojson),
-        schedule_variants (id, label, service_type, day_rule, color_code)
+        schedule_variants!assignments_variant_id_fkey (id, label, service_type, day_rule, color_code)
       `)
       .eq('driver_id', profile.id)
       .eq('scheduled_date', today)
