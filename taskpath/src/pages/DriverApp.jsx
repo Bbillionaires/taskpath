@@ -3,7 +3,6 @@ import RouteMap from '../components/RouteMap'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
 
-// ── Schedule variant colors ────────────────────────────────────────────────
 const VARIANT_COLORS = {
   weekday:  { bg: '#1E3A5F', border: '#3B82F6', text: '#93C5FD' },
   saturday: { bg: '#14532D', border: '#22C55E', text: '#86EFAC' },
@@ -18,13 +17,10 @@ function VariantBadge({ label, dayRule }) {
       background: c.bg, border: `1px solid ${c.border}`, color: c.text,
       borderRadius: 6, padding: '2px 8px', fontSize: 10,
       fontWeight: 700, fontFamily: 'monospace', letterSpacing: 0.5,
-    }}>
-      {label}
-    </span>
+    }}>{label}</span>
   )
 }
 
-// ── Resolve today's variant from a route's schedule_variants ──────────────
 function getTodayVariant(variants) {
   if (!variants?.length) return null
   const dow = new Date().getDay()
@@ -34,7 +30,6 @@ function getTodayVariant(variants) {
     ?? variants[0]
 }
 
-// ── GPS hook ──────────────────────────────────────────────────────────────
 function useGPS(active) {
   const [pos, setPos] = useState(null)
   const [error, setError] = useState(null)
@@ -45,12 +40,14 @@ function useGPS(active) {
       if (watchRef.current) navigator.geolocation.clearWatch(watchRef.current)
       return
     }
-    if (!navigator.geolocation) {
-      setError('Geolocation not supported on this device.')
-      return
-    }
+    if (!navigator.geolocation) { setError('Geolocation not supported.'); return }
     watchRef.current = navigator.geolocation.watchPosition(
-      pos => setPos({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+      p => setPos({
+        lat: p.coords.latitude,
+        lng: p.coords.longitude,
+        accuracy: p.coords.accuracy,
+        heading: p.coords.heading ?? null,
+      }),
       err => setError(err.message),
       { enableHighAccuracy: true, maximumAge: 5000 }
     )
@@ -75,43 +72,81 @@ export default function DriverApp() {
   const timerRef = useRef(null)
   const gpsTrackRef = useRef([])
 
-  // Load today's assignment
+  // Profile / vehicle fields
+  const [vehicleInfo, setVehicleInfo] = useState({
+    vehicle_tag: '', insurance_policy: '', vehicle_make_model: '',
+    vehicle_owner: '', vehicle_company: '', scheduled_hours: '', pay_rate: '', notes: '',
+  })
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileMsg, setProfileMsg] = useState(null)
+
   useEffect(() => {
     loadTodayAssignment()
     loadRecentRecords()
+    loadProfile()
   }, [])
 
-  // Append GPS points to track while job is active
+  // GPS track + real-time location upsert
   useEffect(() => {
-    if (jobActive && pos) {
-      gpsTrackRef.current.push({ lat: pos.lat, lng: pos.lng, ts: Date.now() })
+    if (!pos) return
+    if (jobActive) {
+      gpsTrackRef.current.push({ lat: pos.lat, lng: pos.lng, heading: pos.heading, ts: Date.now() })
+    }
+    if (assignment) {
+      supabase.from('driver_locations').upsert({
+        driver_id: profile.id,
+        assignment_id: assignment.id,
+        lat: pos.lat,
+        lng: pos.lng,
+        heading: pos.heading,
+        accuracy: pos.accuracy,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'driver_id' })
     }
   }, [pos, jobActive])
+
+  async function loadProfile() {
+    const { data } = await supabase.from('profiles').select('*').eq('id', profile.id).single()
+    if (data) setVehicleInfo({
+      vehicle_tag: data.vehicle_tag ?? '',
+      insurance_policy: data.insurance_policy ?? '',
+      vehicle_make_model: data.vehicle_make_model ?? '',
+      vehicle_owner: data.vehicle_owner ?? '',
+      vehicle_company: data.vehicle_company ?? '',
+      scheduled_hours: data.scheduled_hours ?? '',
+      pay_rate: data.pay_rate ?? '',
+      notes: data.notes ?? '',
+    })
+  }
+
+  async function saveProfile() {
+    setProfileSaving(true)
+    const { error } = await supabase.from('profiles').update(vehicleInfo).eq('id', profile.id)
+    if (error) setProfileMsg({ type: 'error', text: error.message })
+    else setProfileMsg({ type: 'success', text: 'Profile saved!' })
+    setProfileSaving(false)
+    setTimeout(() => setProfileMsg(null), 3000)
+  }
 
   async function loadTodayAssignment() {
     setLoading(true)
     const today = new Date().toISOString().split('T')[0]
     const { data } = await supabase
       .from('assignments')
-      .select(`
-        *,
-        routes (id, name, description, geojson),
-        schedule_variants!assignments_variant_id_fkey (id, label, service_type, day_rule, color_code)
-      `)
+      .select(`*, routes(id,name,description,geojson), schedule_variants!assignments_variant_id_fkey(id,label,service_type,day_rule,color_code)`)
       .eq('driver_id', profile.id)
       .eq('scheduled_date', today)
       .in('status', ['pending', 'in_progress'])
       .order('created_at', { ascending: true })
       .limit(1)
       .single()
-
     if (data) {
       setAssignment(data)
-      const v = getTodayVariant(data.schedule_variants
-        ? Array.isArray(data.schedule_variants)
-          ? data.schedule_variants
-          : [data.schedule_variants]
-        : [])
+      const v = getTodayVariant(
+        data.schedule_variants
+          ? Array.isArray(data.schedule_variants) ? data.schedule_variants : [data.schedule_variants]
+          : []
+      )
       setVariant(v)
     }
     setLoading(false)
@@ -120,7 +155,7 @@ export default function DriverApp() {
   async function loadRecentRecords() {
     const { data } = await supabase
       .from('job_records')
-      .select('*, routes(name), schedule_variants(label, day_rule)')
+      .select('*, routes(name), schedule_variants(label,day_rule)')
       .eq('driver_id', profile.id)
       .order('started_at', { ascending: false })
       .limit(20)
@@ -128,44 +163,36 @@ export default function DriverApp() {
   }
 
   function startJob() {
-    const now = new Date()
-    setJobStart(now)
+    setJobStart(new Date())
     setJobActive(true)
     gpsTrackRef.current = []
     timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000)
-    // Update assignment status
     supabase.from('assignments').update({ status: 'in_progress' }).eq('id', assignment.id)
   }
 
   async function completeJob() {
     clearInterval(timerRef.current)
     setJobActive(false)
-    const endTime = new Date()
     const track = gpsTrackRef.current
-
-    // Save job record
-    const { data: record } = await supabase.from('job_records').insert({
+    await supabase.from('job_records').insert({
       assignment_id: assignment.id,
       driver_id: profile.id,
       route_id: assignment.route_id,
       variant_id: variant?.id,
       started_at: jobStart.toISOString(),
-      completed_at: endTime.toISOString(),
+      completed_at: new Date().toISOString(),
       coverage_pct: coverage,
       gps_track: { type: 'LineString', coordinates: track.map(p => [p.lng, p.lat]) },
-    }).select().single()
-
-    // Update assignment status
+    })
     await supabase.from('assignments').update({ status: 'completed' }).eq('id', assignment.id)
-
+    await supabase.from('driver_locations').delete().eq('driver_id', profile.id)
     await loadRecentRecords()
     setScreen('records')
   }
 
-  const eStr = `${String(Math.floor(elapsed/60)).padStart(2,'0')}:${String(elapsed%60).padStart(2,'0')}`
+  const eStr = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
-
-  const B = (bg, color='#fff', disabled=false) => ({
+  const B = (bg, color = '#fff', disabled = false) => ({
     background: disabled ? 'rgba(255,255,255,0.06)' : bg,
     color: disabled ? 'rgba(255,255,255,0.2)' : color,
     border: 'none', borderRadius: 13, padding: '15px',
@@ -173,39 +200,33 @@ export default function DriverApp() {
     width: '100%', letterSpacing: 0.3,
   })
 
+  const Inp = ({ label, textarea, ...props }) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      {label && <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>{label}</label>}
+      {textarea
+        ? <textarea {...props} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: '10px 12px', color: '#fff', fontSize: 13, outline: 'none', width: '100%', minHeight: 80, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit', ...props.style }}/>
+        : <input {...props} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: '10px 12px', color: '#fff', fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box', ...props.style }}/>
+      }
+    </div>
+  )
+
   return (
-    <div style={{
-      height: '100vh', background: '#0A0F1A', color: '#fff',
-      fontFamily: "'DM Sans','Segoe UI',sans-serif",
-      maxWidth: 480, margin: '0 auto', display: 'flex', flexDirection: 'column',
-    }}>
+    <div style={{ height: '100vh', background: '#0A0F1A', color: '#fff', fontFamily: "'DM Sans','Segoe UI',sans-serif", maxWidth: 480, margin: '0 auto', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
-      <div style={{ padding: '14px 16px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div style={{ padding: '14px 16px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
         <div>
           <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -0.5 }}>
             Task<span style={{ color: '#F59E0B' }}>Path</span>
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginLeft: 8, letterSpacing: 1 }}>
-              DRIVER
-            </span>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginLeft: 8, letterSpacing: 1 }}>DRIVER</span>
           </div>
-          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.38)', marginTop: 2, fontFamily: 'monospace' }}>
-            {today}
-          </div>
+          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.38)', marginTop: 2, fontFamily: 'monospace' }}>{today}</div>
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {['home','map','records'].map(s => (
-            <button key={s} onClick={() => setScreen(s)} style={{
-              background: screen === s ? 'rgba(245,158,11,0.12)' : 'rgba(255,255,255,0.05)',
-              border: screen === s ? '1px solid rgba(245,158,11,0.3)' : '1px solid transparent',
-              color: screen === s ? '#F59E0B' : 'rgba(255,255,255,0.38)',
-              borderRadius: 8, padding: '5px 10px', fontSize: 10, fontWeight: 700,
-              cursor: 'pointer', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: 0.5,
-            }}>{s}</button>
-          ))}
-        </div>
+        <button onClick={signOut} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.45)', borderRadius: 8, padding: '6px 14px', fontSize: 11, cursor: 'pointer', fontFamily: 'monospace' }}>
+          Sign out
+        </button>
       </div>
 
-      {/* ── HOME ── */}
+      {/* HOME */}
       {screen === 'home' && (
         <div style={{ padding: 14, flex: 1, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto' }}>
           {loading ? (
@@ -223,15 +244,13 @@ export default function DriverApp() {
                 )}
                 <div style={{ display: 'flex', gap: 9 }}>
                   <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={() => setScreen('map')}>View Map →</button>
-                  {!jobActive && <button style={B('linear-gradient(135deg,#065F46,#059669)')} onClick={() => { setScreen('map'); startJob(); }}>▶ Start Sweep</button>}
+                  {!jobActive && <button style={B('linear-gradient(135deg,#065F46,#059669)')} onClick={() => { setScreen('map'); startJob() }}>▶ Start Sweep</button>}
                 </div>
               </div>
-
-              {/* GPS status */}
               <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ width: 7, height: 7, borderRadius: '50%', background: pos ? '#22C55E' : '#F59E0B', boxShadow: `0 0 8px ${pos ? '#22C55E' : '#F59E0B'}`, flexShrink: 0 }}/>
                 <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
-                  {pos ? `GPS active · ±${Math.round(pos.accuracy)}m accuracy` : gpsError ? `GPS error: ${gpsError}` : 'GPS not yet active — start a job to enable'}
+                  {pos ? `GPS active · ±${Math.round(pos.accuracy)}m${pos.heading != null ? ` · ${Math.round(pos.heading)}°` : ''}` : gpsError ? `GPS error: ${gpsError}` : 'GPS activates when job starts'}
                 </span>
               </div>
             </>
@@ -241,12 +260,11 @@ export default function DriverApp() {
               <div style={{ fontSize: 11, fontFamily: 'monospace', marginTop: 6 }}>Contact your supervisor.</div>
             </div>
           )}
-
-          {/* Stats */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            {[['Jobs This Week', records.filter(r => { const d = new Date(r.started_at); const now = new Date(); return (now - d) < 7*24*3600*1000 }).length, '#F59E0B'],
-              ['Avg Coverage', records.length ? Math.round(records.reduce((a,r)=>a+(r.coverage_pct||0),0)/records.length) + '%' : '—', '#22C55E']
-            ].map(([l,v,c]) => (
+            {[
+              ['Jobs This Week', records.filter(r => (new Date() - new Date(r.started_at)) < 7*24*3600*1000).length, '#F59E0B'],
+              ['Avg Coverage', records.length ? Math.round(records.reduce((a, r) => a + (r.coverage_pct || 0), 0) / records.length) + '%' : '—', '#22C55E'],
+            ].map(([l, v, c]) => (
               <div key={l} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 14, padding: 16 }}>
                 <div style={{ fontSize: 26, fontWeight: 800, color: c, fontFamily: 'monospace' }}>{v}</div>
                 <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace', letterSpacing: 1, marginTop: 4 }}>{l.toUpperCase()}</div>
@@ -256,10 +274,9 @@ export default function DriverApp() {
         </div>
       )}
 
-      {/* ── MAP ── */}
+      {/* MAP */}
       {screen === 'map' && (
         <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 11, flex: 1 }}>
-          {/* Route info */}
           <div style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 13, padding: '11px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', letterSpacing: 1.2, marginBottom: 2 }}>ROUTE</div>
@@ -273,14 +290,11 @@ export default function DriverApp() {
               </div>
             </div>
           </div>
-
           <RouteMap
-  geojson={assignment?.routes?.geojson}
-  gpsPos={pos}
-  sweptCoords={gpsTrackRef.current.map(p => [p.lat, p.lng])}
-/>
-
-          {/* Progress */}
+            geojson={assignment?.routes?.geojson}
+            gpsPos={pos}
+            sweptCoords={gpsTrackRef.current.map(p => [p.lat, p.lng])}
+          />
           {jobActive && (
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
@@ -292,56 +306,44 @@ export default function DriverApp() {
               </div>
             </div>
           )}
-
-          {/* Controls */}
           <div style={{ display: 'flex', gap: 9, marginTop: 'auto' }}>
             {!jobActive && assignment && (
               <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={startJob}>▶ Start Sweep</button>
             )}
             {jobActive && (
               <>
-                <button style={B('rgba(255,255,255,0.06)','rgba(255,255,255,0.55)')} onClick={completeJob}>✓ Mark Complete</button>
-                <button style={{ ...B('rgba(239,68,68,0.12)','#FCA5A5'), width: 'auto', padding: '15px 18px' }}
-                  onClick={() => { clearInterval(timerRef.current); setJobActive(false); }}>⏸</button>
+                <button style={B('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.55)')} onClick={completeJob}>✓ Mark Complete</button>
+                <button style={{ ...B('rgba(239,68,68,0.12)', '#FCA5A5'), width: 'auto', padding: '15px 18px' }}
+                  onClick={() => { clearInterval(timerRef.current); setJobActive(false) }}>⏸</button>
               </>
             )}
           </div>
         </div>
       )}
 
-      {/* ── RECORDS ── */}
+      {/* RECORDS */}
       {screen === 'records' && (
         <div style={{ padding: 14, flex: 1, overflow: 'auto' }}>
           <div style={{ fontSize: 10, fontWeight: 700, marginBottom: 14, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', letterSpacing: 1 }}>
             JOB HISTORY · {records.length} records
           </div>
           {records.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '60px 16px', color: 'rgba(255,255,255,0.2)', fontSize: 13 }}>
-              No completed jobs yet.
-            </div>
+            <div style={{ textAlign: 'center', padding: '60px 16px', color: 'rgba(255,255,255,0.2)', fontSize: 13 }}>No completed jobs yet.</div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               {records.map((job, i) => (
                 <div key={job.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '13px 15px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 700, fontFamily: 'monospace', marginBottom: 3 }}>
-                      Job #{String(records.length - i).padStart(3,'0')}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 5 }}>
-                      {job.routes?.name ?? 'Unknown route'}
-                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 700, fontFamily: 'monospace', marginBottom: 3 }}>Job #{String(records.length - i).padStart(3, '0')}</div>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 5 }}>{job.routes?.name ?? 'Unknown route'}</div>
                     <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                       {job.schedule_variants && <VariantBadge label={job.schedule_variants.label} dayRule={job.schedule_variants.day_rule}/>}
                       <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>
-                        {new Date(job.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                        {' · '}
-                        {job.coverage_pct ?? 0}% covered
+                        {new Date(job.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · {job.coverage_pct ?? 0}% covered
                       </span>
                     </div>
                   </div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: '#4ADE80', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.2)', padding: '4px 9px', borderRadius: 99, fontFamily: 'monospace', flexShrink: 0 }}>
-                    ✓ Done
-                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: '#4ADE80', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.2)', padding: '4px 9px', borderRadius: 99, fontFamily: 'monospace', flexShrink: 0 }}>✓ Done</div>
                 </div>
               ))}
             </div>
@@ -349,9 +351,45 @@ export default function DriverApp() {
         </div>
       )}
 
+      {/* PROFILE */}
+      {screen === 'profile' && (
+        <div style={{ padding: 14, flex: 1, overflow: 'auto' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, marginBottom: 14, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', letterSpacing: 1 }}>DRIVER PROFILE</div>
+          <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 14, padding: 16, marginBottom: 14 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2 }}>{profile?.full_name}</div>
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>{profile?.role?.toUpperCase()}</div>
+          </div>
+          {profileMsg && (
+            <div style={{ background: profileMsg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', border: `1px solid ${profileMsg.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: profileMsg.type === 'error' ? '#FCA5A5' : '#86EFAC', marginBottom: 14 }}>
+              {profileMsg.text}
+            </div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', letterSpacing: 1.5 }}>VEHICLE INFORMATION</div>
+            <Inp label="Vehicle Tag / License Plate" placeholder="e.g. ABC-1234" value={vehicleInfo.vehicle_tag} onChange={e => setVehicleInfo(v => ({ ...v, vehicle_tag: e.target.value }))}/>
+            <Inp label="Vehicle Make & Model" placeholder="e.g. 2022 Elgin Pelican" value={vehicleInfo.vehicle_make_model} onChange={e => setVehicleInfo(v => ({ ...v, vehicle_make_model: e.target.value }))}/>
+            <Inp label="Insurance Policy Number" placeholder="e.g. POL-00123456" value={vehicleInfo.insurance_policy} onChange={e => setVehicleInfo(v => ({ ...v, insurance_policy: e.target.value }))}/>
+            <Inp label="Vehicle Owner" placeholder="e.g. John Smith" value={vehicleInfo.vehicle_owner} onChange={e => setVehicleInfo(v => ({ ...v, vehicle_owner: e.target.value }))}/>
+            <Inp label="Owner Company" placeholder="e.g. Smith Fleet LLC" value={vehicleInfo.vehicle_company} onChange={e => setVehicleInfo(v => ({ ...v, vehicle_company: e.target.value }))}/>
+            <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', letterSpacing: 1.5, marginTop: 4 }}>WORK DETAILS</div>
+            <Inp label="Scheduled Work Hours" placeholder="e.g. Mon–Fri 6:00AM–2:00PM" value={vehicleInfo.scheduled_hours} onChange={e => setVehicleInfo(v => ({ ...v, scheduled_hours: e.target.value }))}/>
+            <Inp label="Pay Rate" placeholder="e.g. $22/hr" value={vehicleInfo.pay_rate} onChange={e => setVehicleInfo(v => ({ ...v, pay_rate: e.target.value }))}/>
+            <Inp textarea label="Notes" placeholder="Any additional notes…" value={vehicleInfo.notes} onChange={e => setVehicleInfo(v => ({ ...v, notes: e.target.value }))}/>
+            <button onClick={saveProfile} disabled={profileSaving} style={B('linear-gradient(135deg,#1D4ED8,#3B82F6)', '#fff', profileSaving)}>
+              {profileSaving ? 'Saving…' : 'Save Profile'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Bottom Nav */}
       <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', background: '#0A0F1A' }}>
-        {[{id:'home',icon:'⌂',l:'Home'},{id:'map',icon:'◉',l:'Map'},{id:'records',icon:'≡',l:'History'}].map(t => (
+        {[
+          { id: 'home', icon: '⌂', l: 'Home' },
+          { id: 'map', icon: '◉', l: 'Map' },
+          { id: 'records', icon: '≡', l: 'History' },
+          { id: 'profile', icon: '◎', l: 'Profile' },
+        ].map(t => (
           <button key={t.id} onClick={() => setScreen(t.id)} style={{
             flex: 1, padding: '12px 8px', background: 'none', border: 'none',
             color: screen === t.id ? '#F59E0B' : 'rgba(255,255,255,0.25)',
