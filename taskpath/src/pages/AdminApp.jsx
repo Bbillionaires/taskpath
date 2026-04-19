@@ -1,4 +1,3 @@
-import { supabaseAdmin } from '../lib/supabaseAdmin'
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
@@ -258,16 +257,22 @@ function DriversTab() {
 
   async function createDriver() {
     setSaving(true)
-    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-      email: form.email, password: form.password, email_confirm: true,
+    const response = await fetch('/api/create-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: form.email,
+        password: form.password,
+        full_name: form.full_name,
+        role: form.role,
+        zone_id: form.zone_id,
+      }),
     })
-    if (authError) { setMsg({ type: 'error', text: authError.message }); setSaving(false); return }
-    const { error: profileError } = await supabase.from('profiles')
-      .update({ full_name: form.full_name, role: form.role, assigned_zone_id: form.zone_id || null })
-      .eq('auth_user_id', authData.user.id)
-    if (profileError) setMsg({ type: 'error', text: profileError.message })
-    else {
-      setMsg({ type: 'success', text: `${form.role} account created for ${form.full_name}!` })
+    const data = await response.json()
+    if (!response.ok) {
+      setMsg({ type: 'error', text: data.error ?? 'Failed to create user' })
+    } else {
+      setMsg({ type: 'success', text: `Account created for ${form.full_name}!` })
       setForm({ full_name: '', email: '', password: '', role: 'driver', zone_id: '' })
       setShowForm(false)
       loadAll()
