@@ -13,11 +13,7 @@ const VARIANT_COLORS = {
 function VariantBadge({ label, dayRule }) {
   const c = VARIANT_COLORS[dayRule] ?? VARIANT_COLORS.weekday
   return (
-    <span style={{
-      background: c.bg, border: `1px solid ${c.border}`, color: c.text,
-      borderRadius: 6, padding: '2px 8px', fontSize: 10,
-      fontWeight: 700, fontFamily: 'monospace', letterSpacing: 0.5,
-    }}>{label}</span>
+    <span style={{ background: c.bg, border: `1px solid ${c.border}`, color: c.text, borderRadius: 6, padding: '2px 8px', fontSize: 10, fontWeight: 700, fontFamily: 'monospace', letterSpacing: 0.5 }}>{label}</span>
   )
 }
 
@@ -25,36 +21,94 @@ function getTodayVariant(variants) {
   if (!variants?.length) return null
   const dow = new Date().getDay()
   const rule = dow === 0 ? 'sunday' : dow === 6 ? 'saturday' : 'weekday'
-  return variants.find(v => v.day_rule === rule)
-    ?? variants.find(v => v.day_rule === 'weekday')
-    ?? variants[0]
+  return variants.find(v => v.day_rule === rule) ?? variants.find(v => v.day_rule === 'weekday') ?? variants[0]
 }
 
 function useGPS(active) {
   const [pos, setPos] = useState(null)
   const [error, setError] = useState(null)
   const watchRef = useRef(null)
-
   useEffect(() => {
-    if (!active) {
-      if (watchRef.current) navigator.geolocation.clearWatch(watchRef.current)
-      return
-    }
+    if (!active) { if (watchRef.current) navigator.geolocation.clearWatch(watchRef.current); return }
     if (!navigator.geolocation) { setError('Geolocation not supported.'); return }
     watchRef.current = navigator.geolocation.watchPosition(
-      p => setPos({
-        lat: p.coords.latitude,
-        lng: p.coords.longitude,
-        accuracy: p.coords.accuracy,
-        heading: p.coords.heading ?? null,
-      }),
+      p => setPos({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy, heading: p.coords.heading ?? null }),
       err => setError(err.message),
       { enableHighAccuracy: true, maximumAge: 5000 }
     )
     return () => navigator.geolocation.clearWatch(watchRef.current)
   }, [active])
-
   return { pos, error }
+}
+
+// ── Edit Job Modal ─────────────────────────────────────────────────────────
+function EditJobModal({ job, onClose, onSaved }) {
+  const { profile } = useAuth()
+  const [reason, setReason] = useState('')
+  const [notes, setNotes] = useState(job.notes ?? '')
+  const [coveragePct, setCoveragePct] = useState(job.coverage_pct ?? 0)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+
+  async function submitEdit() {
+    if (!reason.trim()) { setError('Please provide a reason for the edit.'); return }
+    setSaving(true)
+
+    const edits = []
+    if (coveragePct !== job.coverage_pct) {
+      edits.push({ job_record_id: job.id, driver_id: profile.id, reason, field_changed: 'coverage_pct', old_value: String(job.coverage_pct ?? 0), new_value: String(coveragePct) })
+    }
+    if (notes !== (job.notes ?? '')) {
+      edits.push({ job_record_id: job.id, driver_id: profile.id, reason, field_changed: 'notes', old_value: job.notes ?? '', new_value: notes })
+    }
+    if (edits.length === 0) {
+      edits.push({ job_record_id: job.id, driver_id: profile.id, reason, field_changed: 'general', old_value: '', new_value: '' })
+    }
+
+    await supabase.from('job_records').update({ coverage_pct: coveragePct, notes }).eq('id', job.id)
+    await supabase.from('job_edits').insert(edits)
+
+    setSaving(false)
+    onSaved()
+    onClose()
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 9999, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <div style={{ background: '#0F1623', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '20px 20px 0 0', padding: 20, width: '100%', maxWidth: 480 }}>
+        <div style={{ fontSize: 14, fontWeight: 800, marginBottom: 4 }}>Edit Job Record</div>
+        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 16 }}>{job.routes?.name ?? 'Unknown route'} · {new Date(job.started_at).toLocaleDateString()}</div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>Coverage %</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <input type="range" min={0} max={100} value={coveragePct} onChange={e => setCoveragePct(Number(e.target.value))} style={{ flex: 1 }}/>
+              <span style={{ fontSize: 14, fontWeight: 700, color: '#F59E0B', fontFamily: 'monospace', width: 40, textAlign: 'right' }}>{coveragePct}%</span>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>Notes</label>
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Add any notes about this job…" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: '10px 12px', color: '#fff', fontSize: 13, outline: 'none', width: '100%', minHeight: 70, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' }}/>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>Reason for Edit <span style={{ color: '#EF4444' }}>*</span></label>
+            <textarea value={reason} onChange={e => setReason(e.target.value)} placeholder="Explain why you are editing this record…" style={{ background: 'rgba(255,255,255,0.05)', border: `1px solid ${error ? 'rgba(239,68,68,0.5)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 10, padding: '10px 12px', color: '#fff', fontSize: 13, outline: 'none', width: '100%', minHeight: 70, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' }}/>
+            {error && <div style={{ fontSize: 11, color: '#FCA5A5' }}>{error}</div>}
+          </div>
+
+          <div style={{ display: 'flex', gap: 9, marginTop: 4 }}>
+            <button onClick={onClose} style={{ flex: 1, padding: '13px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+            <button onClick={submitEdit} disabled={saving} style={{ flex: 2, padding: '13px', background: saving ? 'rgba(245,158,11,0.3)' : 'linear-gradient(135deg,#B45309,#F59E0B)', border: 'none', borderRadius: 12, color: '#fff', fontSize: 13, fontWeight: 700, cursor: saving ? 'not-allowed' : 'pointer' }}>
+              {saving ? 'Saving…' : 'Submit Edit'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export default function DriverApp() {
@@ -68,11 +122,12 @@ export default function DriverApp() {
   const [coverage, setCoverage] = useState(0)
   const [records, setRecords] = useState([])
   const [loading, setLoading] = useState(true)
+  const [editingJob, setEditingJob] = useState(null)
+  const [driverEditEnabled, setDriverEditEnabled] = useState(false)
   const { pos, error: gpsError } = useGPS(jobActive)
   const timerRef = useRef(null)
   const gpsTrackRef = useRef([])
 
-  // Profile / vehicle fields
   const [vehicleInfo, setVehicleInfo] = useState({
     vehicle_tag: '', insurance_policy: '', vehicle_make_model: '',
     vehicle_owner: '', vehicle_company: '', scheduled_hours: '', pay_rate: '', notes: '',
@@ -84,22 +139,26 @@ export default function DriverApp() {
     loadTodayAssignment()
     loadRecentRecords()
     loadProfile()
+    checkEditFlag()
   }, [])
 
-  // GPS track + real-time location upsert
+  async function checkEditFlag() {
+    const { data } = await supabase
+      .from('feature_flags')
+      .select('enabled')
+      .eq('flag_name', 'driver_edit_enabled')
+      .eq('enabled', true)
+      .limit(1)
+    setDriverEditEnabled((data?.length ?? 0) > 0)
+  }
+
   useEffect(() => {
     if (!pos) return
-    if (jobActive) {
-      gpsTrackRef.current.push({ lat: pos.lat, lng: pos.lng, heading: pos.heading, ts: Date.now() })
-    }
+    if (jobActive) gpsTrackRef.current.push({ lat: pos.lat, lng: pos.lng, heading: pos.heading, ts: Date.now() })
     if (assignment) {
       supabase.from('driver_locations').upsert({
-        driver_id: profile.id,
-        assignment_id: assignment.id,
-        lat: pos.lat,
-        lng: pos.lng,
-        heading: pos.heading,
-        accuracy: pos.accuracy,
+        driver_id: profile.id, assignment_id: assignment.id,
+        lat: pos.lat, lng: pos.lng, heading: pos.heading, accuracy: pos.accuracy,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'driver_id' })
     }
@@ -107,16 +166,7 @@ export default function DriverApp() {
 
   async function loadProfile() {
     const { data } = await supabase.from('profiles').select('*').eq('id', profile.id).single()
-    if (data) setVehicleInfo({
-      vehicle_tag: data.vehicle_tag ?? '',
-      insurance_policy: data.insurance_policy ?? '',
-      vehicle_make_model: data.vehicle_make_model ?? '',
-      vehicle_owner: data.vehicle_owner ?? '',
-      vehicle_company: data.vehicle_company ?? '',
-      scheduled_hours: data.scheduled_hours ?? '',
-      pay_rate: data.pay_rate ?? '',
-      notes: data.notes ?? '',
-    })
+    if (data) setVehicleInfo({ vehicle_tag: data.vehicle_tag ?? '', insurance_policy: data.insurance_policy ?? '', vehicle_make_model: data.vehicle_make_model ?? '', vehicle_owner: data.vehicle_owner ?? '', vehicle_company: data.vehicle_company ?? '', scheduled_hours: data.scheduled_hours ?? '', pay_rate: data.pay_rate ?? '', notes: data.notes ?? '' })
   }
 
   async function saveProfile() {
@@ -142,11 +192,7 @@ export default function DriverApp() {
       .single()
     if (data) {
       setAssignment(data)
-      const v = getTodayVariant(
-        data.schedule_variants
-          ? Array.isArray(data.schedule_variants) ? data.schedule_variants : [data.schedule_variants]
-          : []
-      )
+      const v = getTodayVariant(data.schedule_variants ? Array.isArray(data.schedule_variants) ? data.schedule_variants : [data.schedule_variants] : [])
       setVariant(v)
     }
     setLoading(false)
@@ -175,12 +221,9 @@ export default function DriverApp() {
     setJobActive(false)
     const track = gpsTrackRef.current
     await supabase.from('job_records').insert({
-      assignment_id: assignment.id,
-      driver_id: profile.id,
-      route_id: assignment.route_id,
-      variant_id: variant?.id,
-      started_at: jobStart.toISOString(),
-      completed_at: new Date().toISOString(),
+      assignment_id: assignment.id, driver_id: profile.id,
+      route_id: assignment.route_id, variant_id: variant?.id,
+      started_at: jobStart.toISOString(), completed_at: new Date().toISOString(),
       coverage_pct: coverage,
       gps_track: { type: 'LineString', coordinates: track.map(p => [p.lng, p.lat]) },
     })
@@ -212,6 +255,9 @@ export default function DriverApp() {
 
   return (
     <div style={{ height: '100vh', background: '#0A0F1A', color: '#fff', fontFamily: "'DM Sans','Segoe UI',sans-serif", maxWidth: 480, margin: '0 auto', display: 'flex', flexDirection: 'column' }}>
+
+      {editingJob && <EditJobModal job={editingJob} onClose={() => setEditingJob(null)} onSaved={loadRecentRecords}/>}
+
       {/* Header */}
       <div style={{ padding: '14px 16px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
         <div>
@@ -290,11 +336,7 @@ export default function DriverApp() {
               </div>
             </div>
           </div>
-          <RouteMap
-            geojson={assignment?.routes?.geojson}
-            gpsPos={pos}
-            sweptCoords={gpsTrackRef.current.map(p => [p.lat, p.lng])}
-          />
+          <RouteMap geojson={assignment?.routes?.geojson} gpsPos={pos} sweptCoords={gpsTrackRef.current.map(p => [p.lat, p.lng])}/>
           {jobActive && (
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
@@ -307,14 +349,11 @@ export default function DriverApp() {
             </div>
           )}
           <div style={{ display: 'flex', gap: 9, marginTop: 'auto' }}>
-            {!jobActive && assignment && (
-              <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={startJob}>▶ Start Sweep</button>
-            )}
+            {!jobActive && assignment && <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={startJob}>▶ Start Sweep</button>}
             {jobActive && (
               <>
                 <button style={B('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.55)')} onClick={completeJob}>✓ Mark Complete</button>
-                <button style={{ ...B('rgba(239,68,68,0.12)', '#FCA5A5'), width: 'auto', padding: '15px 18px' }}
-                  onClick={() => { clearInterval(timerRef.current); setJobActive(false) }}>⏸</button>
+                <button style={{ ...B('rgba(239,68,68,0.12)', '#FCA5A5'), width: 'auto', padding: '15px 18px' }} onClick={() => { clearInterval(timerRef.current); setJobActive(false) }}>⏸</button>
               </>
             )}
           </div>
@@ -332,18 +371,25 @@ export default function DriverApp() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               {records.map((job, i) => (
-                <div key={job.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '13px 15px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 700, fontFamily: 'monospace', marginBottom: 3 }}>Job #{String(records.length - i).padStart(3, '0')}</div>
-                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 5 }}>{job.routes?.name ?? 'Unknown route'}</div>
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      {job.schedule_variants && <VariantBadge label={job.schedule_variants.label} dayRule={job.schedule_variants.day_rule}/>}
-                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>
-                        {new Date(job.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · {job.coverage_pct ?? 0}% covered
-                      </span>
+                <div key={job.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '13px 15px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: driverEditEnabled ? 10 : 0 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 700, fontFamily: 'monospace', marginBottom: 3 }}>Job #{String(records.length - i).padStart(3, '0')}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 5 }}>{job.routes?.name ?? 'Unknown route'}</div>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        {job.schedule_variants && <VariantBadge label={job.schedule_variants.label} dayRule={job.schedule_variants.day_rule}/>}
+                        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>
+                          {new Date(job.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · {job.coverage_pct ?? 0}% covered
+                        </span>
+                      </div>
                     </div>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#4ADE80', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.2)', padding: '4px 9px', borderRadius: 99, fontFamily: 'monospace', flexShrink: 0 }}>✓ Done</div>
                   </div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: '#4ADE80', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.2)', padding: '4px 9px', borderRadius: 99, fontFamily: 'monospace', flexShrink: 0 }}>✓ Done</div>
+                  {driverEditEnabled && (
+                    <button onClick={() => setEditingJob(job)} style={{ width: '100%', padding: '8px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 9, color: '#F59E0B', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'monospace', letterSpacing: 0.3 }}>
+                      ✎ Edit Record
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -390,12 +436,7 @@ export default function DriverApp() {
           { id: 'records', icon: '≡', l: 'History' },
           { id: 'profile', icon: '◎', l: 'Profile' },
         ].map(t => (
-          <button key={t.id} onClick={() => setScreen(t.id)} style={{
-            flex: 1, padding: '12px 8px', background: 'none', border: 'none',
-            color: screen === t.id ? '#F59E0B' : 'rgba(255,255,255,0.25)',
-            cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
-            borderTop: screen === t.id ? '2px solid #F59E0B' : '2px solid transparent',
-          }}>
+          <button key={t.id} onClick={() => setScreen(t.id)} style={{ flex: 1, padding: '12px 8px', background: 'none', border: 'none', color: screen === t.id ? '#F59E0B' : 'rgba(255,255,255,0.25)', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, borderTop: screen === t.id ? '2px solid #F59E0B' : '2px solid transparent' }}>
             <span style={{ fontSize: 16 }}>{t.icon}</span>
             <span style={{ fontSize: 10, fontFamily: 'monospace', letterSpacing: 0.5, fontWeight: 700 }}>{t.l.toUpperCase()}</span>
           </button>
