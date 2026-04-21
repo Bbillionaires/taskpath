@@ -214,6 +214,10 @@ export default function DriverApp() {
     gpsTrackRef.current = []
     timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000)
     supabase.from('assignments').update({ status: 'in_progress' }).eq('id', assignment.id)
+    // Save start coordinates
+    if (pos) {
+      supabase.from('job_records').update({ start_lat: pos.lat, start_lng: pos.lng }).eq('assignment_id', assignment.id)
+    }
   }
 
   async function completeJob() {
@@ -226,6 +230,11 @@ export default function DriverApp() {
       started_at: jobStart.toISOString(), completed_at: new Date().toISOString(),
       coverage_pct: coverage,
       gps_track: { type: 'LineString', coordinates: track.map(p => [p.lng, p.lat]) },
+      start_lat: track[0]?.lat ?? null,
+      start_lng: track[0]?.lng ?? null,
+      end_lat: track[track.length - 1]?.lat ?? null,
+      end_lng: track[track.length - 1]?.lng ?? null,
+      notes: null,
     })
     await supabase.from('assignments').update({ status: 'completed' }).eq('id', assignment.id)
     await supabase.from('driver_locations').delete().eq('driver_id', profile.id)
