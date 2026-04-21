@@ -116,7 +116,7 @@ function extractYellowRoute(canvas, controlPoints) {
   return simplifyPoints(gpsPath, 0.00005)
 }
 
-// ── Route Tracer with PDF ──────────────────────────────────────────────────
+// ── Route Tracer with PDF Overlay ─────────────────────────────────────────
 function RouteTracer({ route, onClose, onSaved }) {
   const mapRef = useRef(null)
   const mapInstanceRef = useRef(null)
@@ -124,20 +124,20 @@ function RouteTracer({ route, onClose, onSaved }) {
   const markersRef = useRef([])
   const pointsRef = useRef([])
   const canvasRef = useRef(null)
-  const pdfOverlayRef = useRef(null)
   const cpMarkersRef = useRef([])
+  const mapContainerRef = useRef(null)
 
   const [step, setStep] = useState('start')
   const [pointCount, setPointCount] = useState(0)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
-  const [opacity, setOpacity] = useState(0.6)
+  const [opacity, setOpacity] = useState(0.5)
   const [pdfReady, setPdfReady] = useState(false)
   const [controlPoints, setControlPoints] = useState([])
-  const [cpMode, setCpMode] = useState(null)
-  const [extractedRoute, setExtractedRoute] = useState([])
+  const [cpMode, setCpMode] = useState(null) // 'pdf' | 'map' | null
   const [extracting, setExtracting] = useState(false)
 
+  // Init Leaflet map
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return
     const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([30.3322, -81.6557], 14)
@@ -174,10 +174,11 @@ function RouteTracer({ route, onClose, onSaved }) {
     await page.render({ canvasContext: ctx, viewport }).promise
     setPdfReady(true)
     setStep('align')
-    setMsg({ type: 'info', text: 'PDF loaded. Now set 2 control points — click a recognizable intersection on the PDF, then the same spot on the satellite map.' })
+    setMsg({ type: 'info', text: 'PDF loaded and overlaid on map. Use the opacity slider to blend. Click "+ Set Point 1" then click the SAME intersection on both layers.' })
   }
 
-  function handlePDFClick(e) {
+  // Click on the overlay canvas = PDF click
+  function handleOverlayClick(e) {
     if (cpMode !== 'pdf') return
     const canvas = canvasRef.current
     const rect = canvas.getBoundingClientRect()
@@ -185,47 +186,67 @@ function RouteTracer({ route, onClose, onSaved }) {
     const scaleY = canvas.height / rect.height
     const px = (e.clientX - rect.left) * scaleX
     const py = (e.clientY - rect.top) * scaleY
-    const existing = controlPoints.find(cp => !cp.gps)
-    if (!existing) {
-      const newCp = { px, py, gps: null, id: controlPoints.length }
-      setControlPoints(prev => [...prev, newCp])
-      setCpMode('map')
-      setMsg({ type: 'info', text: `Control point ${controlPoints.length + 1} set on PDF. Now click the same intersection on the satellite map.` })
-    }
+
+    const newCp = { px, py, gps: null, id: controlPoints.length }
+    setControlPoints(prev => [...prev, newCp])
+    setCpMode('map')
+    setMsg({ type: 'info', text: `Point ${controlPoints.length + 1} marked on PDF. Now click the exact same intersection on the satellite map below.` })
   }
 
+  // Map clicks for GPS control points or manual tracing
   useEffect(() => {
     const map = mapInstanceRef.current
-    if (!map || cpMode !== 'map') return
+    if (!map) return
 
     function onMapClick(e) {
       const { lat, lng } = e.latlng
-      setControlPoints(prev => {
-        const updated = [...prev]
-        const last = updated[updated.length - 1]
-        if (last && !last.gps) {
-          last.gps = [lat, lng]
-          const marker = L.circleMarker([lat, lng], { radius: 8, color: '#22C55E', fillColor: '#22C55E', fillOpacity: 1 }).addTo(map)
-          cpMarkersRef.current.push(marker)
-        }
-        return updated
-      })
 
-      if (controlPoints.length >= 1) {
-        setCpMode(null)
-        if (controlPoints.length + 1 >= 2) {
-          setMsg({ type: 'success', text: '2 control points set! Ready to extract yellow route.' })
-          setStep('extract')
-        } else {
-          setCpMode('pdf')
-          setMsg({ type: 'info', text: 'Set control point 2 on the PDF.' })
-        }
+      if (cpMode === 'map') {
+        setControlPoints(prev => {
+          const updated = [...prev]
+          const last = updated[updated.length - 1]
+          if (last && !last.gps) {
+            last.gps = [lat, lng]
+            const marker = L.circleMarker([lat, lng], {
+              radius: 10, color: '#22C55E', fillColor: '#22C55E', fillOpacity: 1,
+              weight: 3
+            }).addTo(map)
+            marker.bindTooltip(`P${updated.length}`, { permanent: true, direction: 'top', className: 'cp-label' })
+            cpMarkersRef.current.push(marker)
+          }
+          return updated
+        })
+
+        setControlPoints(prev => {
+          const completedCount = prev.filter(cp => cp.gps).length
+          if (completedCount >= 2) {
+            setCpMode(null)
+            setStep('extract')
+            setMsg({ type: 'success', text: '2 control points set! Click "Auto-Extract Yellow Route" to detect the route.' })
+          } else {
+            setCpMode('pdf')
+            setMsg({ type: 'info', text: `Good! Now set Point ${completedCount + 1} — click on the PDF overlay first.` })
+          }
+          return prev
+        })
+        return
+      }
+
+      if (step === 'manual') {
+        const pt = [lat, lng]
+        pointsRef.current.push(pt)
+        setPointCount(pointsRef.current.length)
+        const isFirst = pointsRef.current.length === 1
+        const m = L.circleMarker(pt, { radius: isFirst ? 7 : 4, color: isFirst ? '#22C55E' : '#F59E0B', fillColor: isFirst ? '#22C55E' : '#F59E0B', fillOpacity: 1 }).addTo(map)
+        markersRef.current.push(m)
+        if (polylineRef.current) polylineRef.current.setLatLngs(pointsRef.current)
+        else polylineRef.current = L.polyline(pointsRef.current, { color: '#F59E0B', weight: 4 }).addTo(map)
       }
     }
 
     map.on('click', onMapClick)
     return () => map.off('click', onMapClick)
-  }, [cpMode, controlPoints])
+  }, [cpMode, step])
 
   function extractRoute() {
     const completeCPs = controlPoints.filter(cp => cp.gps)
@@ -235,45 +256,24 @@ function RouteTracer({ route, onClose, onSaved }) {
       try {
         const extracted = extractYellowRoute(canvasRef.current, completeCPs)
         if (extracted.length < 5) {
-          setMsg({ type: 'error', text: 'Could not detect yellow route. Try adjusting control points or use manual tracing.' })
+          setMsg({ type: 'error', text: 'Could not detect yellow route. Try repositioning control points or use manual tracing.' })
           setExtracting(false)
           return
         }
-        setExtractedRoute(extracted)
         pointsRef.current = extracted
         setPointCount(extracted.length)
-
         const map = mapInstanceRef.current
         if (polylineRef.current) map.removeLayer(polylineRef.current)
         polylineRef.current = L.polyline(extracted, { color: '#F59E0B', weight: 4 }).addTo(map)
         map.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] })
         setStep('preview')
-        setMsg({ type: 'success', text: `Extracted ${extracted.length} GPS points from yellow line! Review and save or refine manually.` })
+        setMsg({ type: 'success', text: `Extracted ${extracted.length} GPS points! Review the yellow line on the map, then save or refine manually.` })
       } catch (err) {
         setMsg({ type: 'error', text: 'Extraction failed. Try manual tracing.' })
       }
       setExtracting(false)
     }, 100)
   }
-
-  useEffect(() => {
-    const map = mapInstanceRef.current
-    if (!map || step !== 'manual') return
-
-    function onMapClick(e) {
-      const pt = [e.latlng.lat, e.latlng.lng]
-      pointsRef.current.push(pt)
-      setPointCount(pointsRef.current.length)
-      const isFirst = pointsRef.current.length === 1
-      const m = L.circleMarker(pt, { radius: isFirst ? 7 : 4, color: isFirst ? '#22C55E' : '#F59E0B', fillColor: isFirst ? '#22C55E' : '#F59E0B', fillOpacity: 1 }).addTo(map)
-      markersRef.current.push(m)
-      if (polylineRef.current) polylineRef.current.setLatLngs(pointsRef.current)
-      else polylineRef.current = L.polyline(pointsRef.current, { color: '#F59E0B', weight: 4 }).addTo(map)
-    }
-
-    map.on('click', onMapClick)
-    return () => map.off('click', onMapClick)
-  }, [step])
 
   function undoLast() {
     if (!pointsRef.current.length) return
@@ -293,14 +293,10 @@ function RouteTracer({ route, onClose, onSaved }) {
     cpMarkersRef.current = []
     if (polylineRef.current) { mapInstanceRef.current.removeLayer(polylineRef.current); polylineRef.current = null }
     setControlPoints([])
-    setExtractedRoute([])
-    setStep('start')
+    setStep(pdfReady ? 'align' : 'start')
     setMsg(null)
+    setCpMode(null)
   }
-
-  useEffect(() => {
-    if (pdfOverlayRef.current) pdfOverlayRef.current.setOpacity(opacity)
-  }, [opacity])
 
   async function saveRoute() {
     if (pointsRef.current.length < 2) { setMsg({ type: 'error', text: 'Need at least 2 points' }); return }
@@ -316,12 +312,14 @@ function RouteTracer({ route, onClose, onSaved }) {
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#0A0F1A', zIndex: 9999, display: 'flex', flexDirection: 'column' }}>
+
       {/* Toolbar */}
-      <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', background: '#0D1421' }}>
         <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.5)', borderRadius: 8, padding: '6px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'monospace' }}>← Back</button>
         <div style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>Tracing: <span style={{ color: '#F59E0B' }}>{route.name}</span></div>
         <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>{pointCount} pts</div>
 
+        {/* Step pills */}
         {['start','align','extract','preview','manual'].map((s, i) => (
           <div key={s} style={{ fontSize: 9, fontFamily: 'monospace', padding: '3px 8px', borderRadius: 6, background: step === s ? 'rgba(245,158,11,0.2)' : 'rgba(255,255,255,0.04)', color: step === s ? '#F59E0B' : 'rgba(255,255,255,0.25)', border: `1px solid ${step === s ? 'rgba(245,158,11,0.4)' : 'rgba(255,255,255,0.06)'}` }}>
             {i + 1}. {s.toUpperCase()}
@@ -340,88 +338,90 @@ function RouteTracer({ route, onClose, onSaved }) {
         </div>
       )}
 
-      {/* Main content */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-
-        {/* Left panel — PDF */}
-        <div style={{ width: pdfReady ? 420 : 300, borderRight: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', background: '#0D1421', flexShrink: 0 }}>
-          <div style={{ padding: '12px 14px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', letterSpacing: 1, marginBottom: 8 }}>PDF MAP</div>
-
-            {!pdfReady ? (
-              <div>
-                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginBottom: 12, lineHeight: 1.6 }}>
-                  Upload the city-issued PDF route map. The yellow line will be automatically extracted and aligned to GPS coordinates.
-                </div>
-                <label style={{ display: 'block', background: 'rgba(245,158,11,0.1)', border: '1px dashed rgba(245,158,11,0.4)', borderRadius: 10, padding: '20px', textAlign: 'center', cursor: 'pointer', color: '#F59E0B', fontSize: 12, fontWeight: 700, fontFamily: 'monospace' }}>
-                  📄 Upload PDF Map
-                  <input type="file" accept=".pdf" onChange={handlePDFUpload} style={{ display: 'none' }}/>
-                </label>
-                <div style={{ marginTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 12 }}>
-                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 8, fontFamily: 'monospace' }}>OR trace manually:</div>
-                  <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Manual Trace</Btn>
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
-                  Control points: {completeCPs.length}/2
-                </div>
-                {step === 'align' && completeCPs.length < 2 && (
-                  <Btn small color="#3B82F6" onClick={() => setCpMode('pdf')}>
-                    {cpMode === 'pdf' ? '🎯 Click intersection on PDF…' : `+ Set Point ${completeCPs.length + 1}`}
-                  </Btn>
-                )}
-                {step === 'extract' && (
-                  <Btn small color="#22C55E" onClick={extractRoute} disabled={extracting}>
-                    {extracting ? 'Extracting…' : '⚡ Auto-Extract Yellow Route'}
-                  </Btn>
-                )}
-                {(step === 'preview' || step === 'extract') && (
-                  <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Refine Manually</Btn>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>PDF OPACITY</label>
-                  <input type="range" min={0} max={1} step={0.05} value={opacity} onChange={e => setOpacity(Number(e.target.value))} style={{ width: '100%' }}/>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* PDF canvas */}
-          <div style={{ flex: 1, overflow: 'auto', position: 'relative' }}>
-            <canvas
-              ref={canvasRef}
-              onClick={handlePDFClick}
-              style={{ display: pdfReady ? 'block' : 'none', width: '100%', cursor: cpMode === 'pdf' ? 'crosshair' : 'default', border: cpMode === 'pdf' ? '2px solid #3B82F6' : 'none' }}
-            />
-            {!pdfReady && (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'rgba(255,255,255,0.15)', fontSize: 12, fontFamily: 'monospace' }}>
-                PDF will appear here
-              </div>
-            )}
-            {controlPoints.map((cp, i) => (
-              <div key={i} style={{ position: 'absolute', left: `${(cp.px / (canvasRef.current?.width || 1)) * 100}%`, top: `${(cp.py / (canvasRef.current?.height || 1)) * 100}%`, transform: 'translate(-50%,-50%)', width: 16, height: 16, borderRadius: '50%', background: cp.gps ? '#22C55E' : '#3B82F6', border: '2px solid #fff', pointerEvents: 'none', zIndex: 10 }}>
-                <div style={{ position: 'absolute', top: -18, left: '50%', transform: 'translateX(-50%)', fontSize: 9, color: '#fff', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>P{i + 1}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Right panel — Satellite map */}
-        <div style={{ flex: 1, position: 'relative' }}>
-          {cpMode === 'map' && (
-            <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(59,130,246,0.9)', borderRadius: 8, padding: '6px 14px', fontSize: 11, color: '#fff', fontFamily: 'monospace', fontWeight: 700 }}>
-              🎯 Click the same intersection on the satellite map
-            </div>
+      {/* Controls bar — shown after PDF loaded */}
+      {pdfReady && (
+        <div style={{ padding: '8px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: '#0D1421', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>PDF OPACITY</div>
+          <input type="range" min={0} max={1} step={0.05} value={opacity}
+            onChange={e => setOpacity(Number(e.target.value))}
+            style={{ width: 120 }}/>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>{Math.round(opacity * 100)}%</div>
+          <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.1)' }}/>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>CONTROL POINTS: {completeCPs.length}/2</div>
+          {step === 'align' && completeCPs.length < 2 && (
+            <Btn small color="#3B82F6" onClick={() => { setCpMode('pdf'); setMsg({ type: 'info', text: `Click on a recognizable intersection on the PDF overlay (it's on top of the map).` }) }}>
+              {cpMode === 'pdf' ? '🎯 Click PDF overlay now…' : cpMode === 'map' ? '🗺 Click satellite map now…' : `+ Set Point ${completeCPs.length + 1}`}
+            </Btn>
           )}
-          {step === 'manual' && (
-            <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(245,158,11,0.9)', borderRadius: 8, padding: '6px 14px', fontSize: 11, color: '#000', fontFamily: 'monospace', fontWeight: 700 }}>
-              🖊 Click on map to trace route manually
-            </div>
+          {step === 'extract' && (
+            <Btn small color="#22C55E" onClick={extractRoute} disabled={extracting}>
+              {extracting ? 'Extracting…' : '⚡ Auto-Extract Yellow Route'}
+            </Btn>
           )}
-          <div ref={mapRef} style={{ width: '100%', height: '100%' }}/>
+          {(step === 'preview' || step === 'extract') && (
+            <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Refine Manually</Btn>
+          )}
         </div>
+      )}
+
+      {/* Map area — full width, PDF overlaid on top */}
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }} ref={mapContainerRef}>
+
+        {/* Satellite map — fills entire area */}
+        <div ref={mapRef} style={{ position: 'absolute', inset: 0 }}/>
+
+        {/* PDF canvas overlay — sits on top of map, pointer-events controlled by cpMode */}
+        {pdfReady && (
+          <canvas
+            ref={canvasRef}
+            onClick={handleOverlayClick}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              opacity: opacity,
+              pointerEvents: cpMode === 'pdf' ? 'auto' : 'none',
+              cursor: cpMode === 'pdf' ? 'crosshair' : 'default',
+              mixBlendMode: 'multiply',
+              zIndex: 500,
+            }}
+          />
+        )}
+
+        {/* Upload prompt — shown before PDF loaded, centered on map */}
+        {!pdfReady && (
+          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 600, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+            <div style={{ background: 'rgba(13,20,33,0.92)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 16, padding: 28, textAlign: 'center', maxWidth: 340 }}>
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)', marginBottom: 16, lineHeight: 1.6 }}>
+                Upload a city-issued PDF route map. It will overlay on the satellite view so you can align and extract the route.
+              </div>
+              <label style={{ display: 'block', background: 'rgba(245,158,11,0.15)', border: '1px dashed rgba(245,158,11,0.5)', borderRadius: 10, padding: '18px 24px', cursor: 'pointer', color: '#F59E0B', fontSize: 13, fontWeight: 700, fontFamily: 'monospace', marginBottom: 16 }}>
+                📄 Upload PDF Map
+                <input type="file" accept=".pdf" onChange={handlePDFUpload} style={{ display: 'none' }}/>
+              </label>
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 10 }}>— or —</div>
+              <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Trace Manually on Map</Btn>
+            </div>
+          </div>
+        )}
+
+        {/* Active mode indicator */}
+        {cpMode === 'pdf' && (
+          <div style={{ position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(59,130,246,0.95)', borderRadius: 8, padding: '7px 16px', fontSize: 12, color: '#fff', fontFamily: 'monospace', fontWeight: 700 }}>
+            🎯 Click a recognizable intersection on the PDF overlay
+          </div>
+        )}
+        {cpMode === 'map' && (
+          <div style={{ position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(34,197,94,0.95)', borderRadius: 8, padding: '7px 16px', fontSize: 12, color: '#000', fontFamily: 'monospace', fontWeight: 700 }}>
+            🗺 Now click the SAME intersection on the satellite map
+          </div>
+        )}
+        {step === 'manual' && (
+          <div style={{ position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(245,158,11,0.95)', borderRadius: 8, padding: '7px 16px', fontSize: 12, color: '#000', fontFamily: 'monospace', fontWeight: 700 }}>
+            🖊 Click on the map to trace the route manually
+          </div>
+        )}
       </div>
     </div>
   )
