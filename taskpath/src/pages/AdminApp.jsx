@@ -383,7 +383,6 @@ function RouteTracer({ route, onClose, onSaved }) {
               opacity: opacity,
               pointerEvents: cpMode === 'pdf' ? 'auto' : 'none',
               cursor: cpMode === 'pdf' ? 'crosshair' : 'default',
-              mixBlendMode: 'multiply',
               zIndex: 500,
             }}
           />
