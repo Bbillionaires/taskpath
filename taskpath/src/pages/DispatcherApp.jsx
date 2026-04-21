@@ -43,7 +43,7 @@ function Btn({ children, onClick, color = '#F59E0B', disabled, small, danger }) 
 
 const STATUS_COLOR = { pending: '#F59E0B', in_progress: '#3B82F6', completed: '#22C55E', paused: '#FB923C', cancelled: '#6B7280', cancelled_due_to_error: '#EF4444' }
 
-export default function DispatcherApp {
+export default function DispatcherApp() {
   const { profile, signOut } = useAuth()
   const [tab, setTab] = useState('assignments')
   const [assignments, setAssignments] = useState([])
