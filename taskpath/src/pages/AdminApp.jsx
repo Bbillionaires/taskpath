@@ -63,19 +63,6 @@ function simplifyPoints(points, tolerance = 0.00003) {
   return result
 }
 
-function pixelToGPS(px, py, controlPoints) {
-  const [p1, p2] = controlPoints
-  const dx_px = p2.px - p1.px
-  const dy_px = p2.py - p1.py
-  const dx_gps = p2.gps[1] - p1.gps[1]
-  const dy_gps = p2.gps[0] - p1.gps[0]
-  const scaleX = dx_gps / dx_px
-  const scaleY = dy_gps / dy_py || dy_gps / (dy_px || 1)
-  const lng = p1.gps[1] + (px - p1.px) * scaleX
-  const lat = p1.gps[0] + (py - p1.py) * (dy_gps / (dy_px || 1))
-  return [lat, lng]
-}
-
 function extractYellowRoute(canvas, controlPoints) {
   const ctx = canvas.getContext('2d')
   const { width, height } = canvas
@@ -93,7 +80,6 @@ function extractYellowRoute(canvas, controlPoints) {
 
   if (yellowPixels.length < 10) return []
 
-  // Sort pixels into a path by nearest neighbor
   const visited = new Set()
   const path = []
   let current = yellowPixels[0]
@@ -115,7 +101,6 @@ function extractYellowRoute(canvas, controlPoints) {
     current = yellowPixels[nextIdx]
   }
 
-  // Convert pixels to GPS
   const [p1, p2] = controlPoints
   const dx_px = p2.px - p1.px || 1
   const dy_px = p2.py - p1.py || 1
@@ -142,24 +127,22 @@ function RouteTracer({ route, onClose, onSaved }) {
   const pdfOverlayRef = useRef(null)
   const cpMarkersRef = useRef([])
 
-  const [step, setStep] = useState('start') // start | pdf | align | preview | manual
+  const [step, setStep] = useState('start')
   const [pointCount, setPointCount] = useState(0)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
   const [opacity, setOpacity] = useState(0.6)
   const [pdfReady, setPdfReady] = useState(false)
-  const [controlPoints, setControlPoints] = useState([]) // [{px, py, gps}]
-  const [cpMode, setCpMode] = useState(null) // 'pdf' | 'map' | null
+  const [controlPoints, setControlPoints] = useState([])
+  const [cpMode, setCpMode] = useState(null)
   const [extractedRoute, setExtractedRoute] = useState([])
   const [extracting, setExtracting] = useState(false)
-  const [pdfBounds, setPdfBounds] = useState(null)
 
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return
     const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([30.3322, -81.6557], 14)
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 }).addTo(map)
 
-    // Load existing route if any
     if (route.geojson) {
       try {
         const geo = typeof route.geojson === 'string' ? JSON.parse(route.geojson) : route.geojson
@@ -202,8 +185,7 @@ function RouteTracer({ route, onClose, onSaved }) {
     const scaleY = canvas.height / rect.height
     const px = (e.clientX - rect.left) * scaleX
     const py = (e.clientY - rect.top) * scaleY
-
-    const existing = controlPoints.find(cp => cp.step === controlPoints.length && !cp.gps)
+    const existing = controlPoints.find(cp => !cp.gps)
     if (!existing) {
       const newCp = { px, py, gps: null, id: controlPoints.length }
       setControlPoints(prev => [...prev, newCp])
@@ -251,22 +233,22 @@ function RouteTracer({ route, onClose, onSaved }) {
     setExtracting(true)
     setTimeout(() => {
       try {
-        const route = extractYellowRoute(canvasRef.current, completeCPs)
-        if (route.length < 5) {
+        const extracted = extractYellowRoute(canvasRef.current, completeCPs)
+        if (extracted.length < 5) {
           setMsg({ type: 'error', text: 'Could not detect yellow route. Try adjusting control points or use manual tracing.' })
           setExtracting(false)
           return
         }
-        setExtractedRoute(route)
-        pointsRef.current = route
-        setPointCount(route.length)
+        setExtractedRoute(extracted)
+        pointsRef.current = extracted
+        setPointCount(extracted.length)
 
         const map = mapInstanceRef.current
         if (polylineRef.current) map.removeLayer(polylineRef.current)
-        polylineRef.current = L.polyline(route, { color: '#F59E0B', weight: 4 }).addTo(map)
+        polylineRef.current = L.polyline(extracted, { color: '#F59E0B', weight: 4 }).addTo(map)
         map.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] })
         setStep('preview')
-        setMsg({ type: 'success', text: `Extracted ${route.length} GPS points from yellow line! Review and save or refine manually.` })
+        setMsg({ type: 'success', text: `Extracted ${extracted.length} GPS points from yellow line! Review and save or refine manually.` })
       } catch (err) {
         setMsg({ type: 'error', text: 'Extraction failed. Try manual tracing.' })
       }
@@ -274,7 +256,6 @@ function RouteTracer({ route, onClose, onSaved }) {
     }, 100)
   }
 
-  // Manual trace mode
   useEffect(() => {
     const map = mapInstanceRef.current
     if (!map || step !== 'manual') return
@@ -317,7 +298,6 @@ function RouteTracer({ route, onClose, onSaved }) {
     setMsg(null)
   }
 
-  // Update PDF overlay opacity
   useEffect(() => {
     if (pdfOverlayRef.current) pdfOverlayRef.current.setOpacity(opacity)
   }, [opacity])
@@ -342,7 +322,6 @@ function RouteTracer({ route, onClose, onSaved }) {
         <div style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>Tracing: <span style={{ color: '#F59E0B' }}>{route.name}</span></div>
         <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>{pointCount} pts</div>
 
-        {/* Step indicators */}
         {['start','align','extract','preview','manual'].map((s, i) => (
           <div key={s} style={{ fontSize: 9, fontFamily: 'monospace', padding: '3px 8px', borderRadius: 6, background: step === s ? 'rgba(245,158,11,0.2)' : 'rgba(255,255,255,0.04)', color: step === s ? '#F59E0B' : 'rgba(255,255,255,0.25)', border: `1px solid ${step === s ? 'rgba(245,158,11,0.4)' : 'rgba(255,255,255,0.06)'}` }}>
             {i + 1}. {s.toUpperCase()}
@@ -421,7 +400,6 @@ function RouteTracer({ route, onClose, onSaved }) {
                 PDF will appear here
               </div>
             )}
-            {/* Control point markers on PDF */}
             {controlPoints.map((cp, i) => (
               <div key={i} style={{ position: 'absolute', left: `${(cp.px / (canvasRef.current?.width || 1)) * 100}%`, top: `${(cp.py / (canvasRef.current?.height || 1)) * 100}%`, transform: 'translate(-50%,-50%)', width: 16, height: 16, borderRadius: '50%', background: cp.gps ? '#22C55E' : '#3B82F6', border: '2px solid #fff', pointerEvents: 'none', zIndex: 10 }}>
                 <div style={{ position: 'absolute', top: -18, left: '50%', transform: 'translateX(-50%)', fontSize: 9, color: '#fff', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>P{i + 1}</div>
@@ -461,6 +439,10 @@ function RoutesTab() {
   const [variantForm, setVariantForm] = useState({ label: '', service_type: '', day_rule: 'weekday', color_code: '#F59E0B' })
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
+  // Zone creation
+  const [showZoneForm, setShowZoneForm] = useState(false)
+  const [newZone, setNewZone] = useState({ name: '', city: '', state: '' })
+  const [savingZone, setSavingZone] = useState(false)
 
   useEffect(() => { loadAll() }, [])
 
@@ -475,18 +457,30 @@ function RoutesTab() {
     setLoading(false)
   }
 
-  async function createZoneIfNeeded() {
-    if (zones.length === 0) {
-      const { data } = await supabase.from('zones').insert({ name: 'Default Zone', city: 'Jacksonville', state: 'FL' }).select().single()
-      setZones([data])
-      return data.id
+  async function createZone() {
+    setSavingZone(true)
+    const { data, error } = await supabase.from('zones').insert({
+      name: newZone.name,
+      city: newZone.city || 'Jacksonville',
+      state: newZone.state || 'FL'
+    }).select().single()
+    if (!error) {
+      setZones(prev => [...prev, data])
+      setForm(f => ({ ...f, zone_id: data.id }))
+      setNewZone({ name: '', city: '', state: '' })
+      setShowZoneForm(false)
     }
-    return form.zone_id || zones[0].id
+    setSavingZone(false)
   }
 
   async function saveRoute() {
     setSaving(true)
-    const zoneId = await createZoneIfNeeded()
+    const zoneId = form.zone_id || (zones.length > 0 ? zones[0].id : null)
+    if (!zoneId) {
+      setMsg({ type: 'error', text: 'Please select or create a zone first.' })
+      setSaving(false)
+      return
+    }
     const { error } = await supabase.from('routes').insert({ name: form.name, description: form.description, zone_id: zoneId, status: 'active' })
     if (error) setMsg({ type: 'error', text: error.message })
     else { setMsg({ type: 'success', text: 'Route created!' }); setForm({ name: '', description: '', zone_id: '' }); setShowForm(false); loadAll() }
@@ -516,11 +510,32 @@ function RoutesTab() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Inp label="Route name" placeholder="e.g. Zone 7A · Norris Canyon Rd" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}/>
             <Inp label="Description (optional)" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}/>
-            {zones.length > 0 && (
-              <Sel label="Zone" value={form.zone_id} onChange={e => setForm(f => ({ ...f, zone_id: e.target.value }))}>
-                {zones.map(z => <option key={z.id} value={z.id}>{z.name} — {z.city}</option>)}
-              </Sel>
-            )}
+
+            {/* Zone selector with inline create */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>ZONE</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <select value={form.zone_id} onChange={e => setForm(f => ({ ...f, zone_id: e.target.value }))}
+                  style={{ background: '#1A2235', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: '10px 12px', color: '#fff', fontSize: 13, outline: 'none', flex: 1 }}>
+                  <option value="">Select zone…</option>
+                  {zones.map(z => <option key={z.id} value={z.id}>{z.name} — {z.city}</option>)}
+                </select>
+                <Btn small onClick={() => setShowZoneForm(v => !v)} color="#3B82F6">{showZoneForm ? 'Cancel' : '+ Zone'}</Btn>
+              </div>
+              {showZoneForm && (
+                <div style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <Inp label="Zone name" placeholder="e.g. Zone 7A" value={newZone.name} onChange={e => setNewZone(z => ({ ...z, name: e.target.value }))}/>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <Inp label="City" placeholder="Jacksonville" value={newZone.city} onChange={e => setNewZone(z => ({ ...z, city: e.target.value }))}/>
+                    <Inp label="State" placeholder="FL" value={newZone.state} onChange={e => setNewZone(z => ({ ...z, state: e.target.value }))}/>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Btn small color="#22C55E" onClick={createZone} disabled={!newZone.name || savingZone}>{savingZone ? 'Saving…' : '✓ Create Zone'}</Btn>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <Btn onClick={saveRoute} disabled={!form.name || saving}>{saving ? 'Saving…' : 'Create Route'}</Btn>
           </div>
         </Card>
