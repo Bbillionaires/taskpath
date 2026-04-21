@@ -3,28 +3,25 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import * as pdfjsLib from 'pdfjs-dist'
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url
+).toString()
 
 const DAY_RULES = ['weekday', 'saturday', 'sunday', 'special']
-const ROLES = ['driver', 'supervisor', 'admin']
+const ROLES = ['driver', 'dispatcher', 'supervisor', 'admin']
 
 function Badge({ label, color = '#F59E0B' }) {
-  return (
-    <span style={{ background: `${color}18`, border: `1px solid ${color}40`, color, borderRadius: 6, padding: '2px 8px', fontSize: 10, fontWeight: 700, fontFamily: 'monospace', letterSpacing: 0.5 }}>{label}</span>
-  )
+  return <span style={{ background: `${color}18`, border: `1px solid ${color}40`, color, borderRadius: 6, padding: '2px 8px', fontSize: 10, fontWeight: 700, fontFamily: 'monospace', letterSpacing: 0.5 }}>{label}</span>
 }
-
 function Card({ children, style = {} }) {
-  return (
-    <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 14, padding: 16, ...style }}>{children}</div>
-  )
+  return <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 14, padding: 16, ...style }}>{children}</div>
 }
-
 function SectionTitle({ children }) {
-  return (
-    <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace', letterSpacing: 1.5, marginBottom: 12 }}>{children}</div>
-  )
+  return <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace', letterSpacing: 1.5, marginBottom: 12 }}>{children}</div>
 }
-
 function Inp({ label, ...props }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -33,7 +30,6 @@ function Inp({ label, ...props }) {
     </div>
   )
 }
-
 function Sel({ label, children, ...props }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -42,36 +38,128 @@ function Sel({ label, children, ...props }) {
     </div>
   )
 }
-
 function Btn({ children, onClick, color = '#F59E0B', disabled, small, danger }) {
   const bg = danger ? 'rgba(239,68,68,0.15)' : `${color}20`
   const border = danger ? 'rgba(239,68,68,0.4)' : `${color}50`
   const txt = danger ? '#FCA5A5' : color
-  return (
-    <button onClick={onClick} disabled={disabled} style={{ background: disabled ? 'rgba(255,255,255,0.04)' : bg, border: `1px solid ${disabled ? 'rgba(255,255,255,0.08)' : border}`, color: disabled ? 'rgba(255,255,255,0.2)' : txt, borderRadius: 10, padding: small ? '6px 12px' : '10px 18px', fontSize: small ? 11 : 13, fontWeight: 700, cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'monospace', letterSpacing: 0.3 }}>{children}</button>
-  )
+  return <button onClick={onClick} disabled={disabled} style={{ background: disabled ? 'rgba(255,255,255,0.04)' : bg, border: `1px solid ${disabled ? 'rgba(255,255,255,0.08)' : border}`, color: disabled ? 'rgba(255,255,255,0.2)' : txt, borderRadius: 10, padding: small ? '6px 12px' : '10px 18px', fontSize: small ? 11 : 13, fontWeight: 700, cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'monospace', letterSpacing: 0.3 }}>{children}</button>
 }
 
-// ── Route Tracer Modal ─────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
+function isYellow(r, g, b) {
+  return r > 160 && g > 140 && b < 100 && r > b + 80 && g > b + 60
+}
+
+function simplifyPoints(points, tolerance = 0.00003) {
+  if (points.length < 3) return points
+  const result = [points[0]]
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = result[result.length - 1]
+    const curr = points[i]
+    const dist = Math.sqrt((curr[0] - prev[0]) ** 2 + (curr[1] - prev[1]) ** 2)
+    if (dist > tolerance) result.push(curr)
+  }
+  result.push(points[points.length - 1])
+  return result
+}
+
+function pixelToGPS(px, py, controlPoints) {
+  const [p1, p2] = controlPoints
+  const dx_px = p2.px - p1.px
+  const dy_px = p2.py - p1.py
+  const dx_gps = p2.gps[1] - p1.gps[1]
+  const dy_gps = p2.gps[0] - p1.gps[0]
+  const scaleX = dx_gps / dx_px
+  const scaleY = dy_gps / dy_py || dy_gps / (dy_px || 1)
+  const lng = p1.gps[1] + (px - p1.px) * scaleX
+  const lat = p1.gps[0] + (py - p1.py) * (dy_gps / (dy_px || 1))
+  return [lat, lng]
+}
+
+function extractYellowRoute(canvas, controlPoints) {
+  const ctx = canvas.getContext('2d')
+  const { width, height } = canvas
+  const imageData = ctx.getImageData(0, 0, width, height)
+  const data = imageData.data
+
+  const yellowPixels = []
+  for (let y = 0; y < height; y += 2) {
+    for (let x = 0; x < width; x += 2) {
+      const idx = (y * width + x) * 4
+      const r = data[idx], g = data[idx + 1], b = data[idx + 2]
+      if (isYellow(r, g, b)) yellowPixels.push([x, y])
+    }
+  }
+
+  if (yellowPixels.length < 10) return []
+
+  // Sort pixels into a path by nearest neighbor
+  const visited = new Set()
+  const path = []
+  let current = yellowPixels[0]
+  visited.add(0)
+
+  for (let i = 0; i < Math.min(yellowPixels.length, 5000); i++) {
+    path.push(current)
+    let minDist = Infinity
+    let nextIdx = -1
+    for (let j = 0; j < yellowPixels.length; j++) {
+      if (visited.has(j)) continue
+      const dx = yellowPixels[j][0] - current[0]
+      const dy = yellowPixels[j][1] - current[1]
+      const dist = dx * dx + dy * dy
+      if (dist < minDist) { minDist = dist; nextIdx = j }
+    }
+    if (nextIdx === -1 || minDist > 2000) break
+    visited.add(nextIdx)
+    current = yellowPixels[nextIdx]
+  }
+
+  // Convert pixels to GPS
+  const [p1, p2] = controlPoints
+  const dx_px = p2.px - p1.px || 1
+  const dy_px = p2.py - p1.py || 1
+  const dx_gps_lng = p2.gps[1] - p1.gps[1]
+  const dy_gps_lat = p2.gps[0] - p1.gps[0]
+
+  const gpsPath = path.map(([px, py]) => {
+    const lng = p1.gps[1] + (px - p1.px) * (dx_gps_lng / dx_px)
+    const lat = p1.gps[0] + (py - p1.py) * (dy_gps_lat / dy_px)
+    return [lat, lng]
+  })
+
+  return simplifyPoints(gpsPath, 0.00005)
+}
+
+// ── Route Tracer with PDF ──────────────────────────────────────────────────
 function RouteTracer({ route, onClose, onSaved }) {
   const mapRef = useRef(null)
   const mapInstanceRef = useRef(null)
   const polylineRef = useRef(null)
   const markersRef = useRef([])
   const pointsRef = useRef([])
+  const canvasRef = useRef(null)
+  const pdfOverlayRef = useRef(null)
+  const cpMarkersRef = useRef([])
+
+  const [step, setStep] = useState('start') // start | pdf | align | preview | manual
   const [pointCount, setPointCount] = useState(0)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
+  const [opacity, setOpacity] = useState(0.6)
+  const [pdfReady, setPdfReady] = useState(false)
+  const [controlPoints, setControlPoints] = useState([]) // [{px, py, gps}]
+  const [cpMode, setCpMode] = useState(null) // 'pdf' | 'map' | null
+  const [extractedRoute, setExtractedRoute] = useState([])
+  const [extracting, setExtracting] = useState(false)
+  const [pdfBounds, setPdfBounds] = useState(null)
 
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return
-
-    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false })
-      .setView([30.3322, -81.6557], 14)
-
+    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([30.3322, -81.6557], 14)
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 }).addTo(map)
 
-    // Load existing GeoJSON if any
+    // Load existing route if any
     if (route.geojson) {
       try {
         const geo = typeof route.geojson === 'string' ? JSON.parse(route.geojson) : route.geojson
@@ -81,35 +169,130 @@ function RouteTracer({ route, onClose, onSaved }) {
           setPointCount(pointsRef.current.length)
           polylineRef.current = L.polyline(pointsRef.current, { color: '#F59E0B', weight: 4 }).addTo(map)
           map.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] })
-          pointsRef.current.forEach((p, i) => {
-            const m = L.circleMarker(p, { radius: i === 0 ? 7 : 4, color: i === 0 ? '#22C55E' : '#F59E0B', fillColor: i === 0 ? '#22C55E' : '#F59E0B', fillOpacity: 1 }).addTo(map)
-            markersRef.current.push(m)
-          })
         }
       } catch (e) {}
     }
 
-    map.on('click', e => {
-      const pt = [e.latlng.lat, e.latlng.lng]
-      pointsRef.current.push(pt)
-      setPointCount(pointsRef.current.length)
-
-      // Add marker
-      const isFirst = pointsRef.current.length === 1
-      const m = L.circleMarker(pt, { radius: isFirst ? 7 : 4, color: isFirst ? '#22C55E' : '#F59E0B', fillColor: isFirst ? '#22C55E' : '#F59E0B', fillOpacity: 1 }).addTo(map)
-      markersRef.current.push(m)
-
-      // Update polyline
-      if (polylineRef.current) {
-        polylineRef.current.setLatLngs(pointsRef.current)
-      } else {
-        polylineRef.current = L.polyline(pointsRef.current, { color: '#F59E0B', weight: 4 }).addTo(map)
-      }
-    })
-
     mapInstanceRef.current = map
     return () => { map.remove(); mapInstanceRef.current = null }
   }, [])
+
+  async function handlePDFUpload(e) {
+    const file = e.target.files[0]
+    if (!file) return
+    const arrayBuffer = await file.arrayBuffer()
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+    const page = await pdf.getPage(1)
+    const viewport = page.getViewport({ scale: 2.5 })
+    const canvas = canvasRef.current
+    canvas.width = viewport.width
+    canvas.height = viewport.height
+    const ctx = canvas.getContext('2d')
+    await page.render({ canvasContext: ctx, viewport }).promise
+    setPdfReady(true)
+    setStep('align')
+    setMsg({ type: 'info', text: 'PDF loaded. Now set 2 control points — click a recognizable intersection on the PDF, then the same spot on the satellite map.' })
+  }
+
+  function handlePDFClick(e) {
+    if (cpMode !== 'pdf') return
+    const canvas = canvasRef.current
+    const rect = canvas.getBoundingClientRect()
+    const scaleX = canvas.width / rect.width
+    const scaleY = canvas.height / rect.height
+    const px = (e.clientX - rect.left) * scaleX
+    const py = (e.clientY - rect.top) * scaleY
+
+    const existing = controlPoints.find(cp => cp.step === controlPoints.length && !cp.gps)
+    if (!existing) {
+      const newCp = { px, py, gps: null, id: controlPoints.length }
+      setControlPoints(prev => [...prev, newCp])
+      setCpMode('map')
+      setMsg({ type: 'info', text: `Control point ${controlPoints.length + 1} set on PDF. Now click the same intersection on the satellite map.` })
+    }
+  }
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map || cpMode !== 'map') return
+
+    function onMapClick(e) {
+      const { lat, lng } = e.latlng
+      setControlPoints(prev => {
+        const updated = [...prev]
+        const last = updated[updated.length - 1]
+        if (last && !last.gps) {
+          last.gps = [lat, lng]
+          const marker = L.circleMarker([lat, lng], { radius: 8, color: '#22C55E', fillColor: '#22C55E', fillOpacity: 1 }).addTo(map)
+          cpMarkersRef.current.push(marker)
+        }
+        return updated
+      })
+
+      if (controlPoints.length >= 1) {
+        setCpMode(null)
+        if (controlPoints.length + 1 >= 2) {
+          setMsg({ type: 'success', text: '2 control points set! Ready to extract yellow route.' })
+          setStep('extract')
+        } else {
+          setCpMode('pdf')
+          setMsg({ type: 'info', text: 'Set control point 2 on the PDF.' })
+        }
+      }
+    }
+
+    map.on('click', onMapClick)
+    return () => map.off('click', onMapClick)
+  }, [cpMode, controlPoints])
+
+  function extractRoute() {
+    const completeCPs = controlPoints.filter(cp => cp.gps)
+    if (completeCPs.length < 2) { setMsg({ type: 'error', text: 'Need 2 complete control points first.' }); return }
+    setExtracting(true)
+    setTimeout(() => {
+      try {
+        const route = extractYellowRoute(canvasRef.current, completeCPs)
+        if (route.length < 5) {
+          setMsg({ type: 'error', text: 'Could not detect yellow route. Try adjusting control points or use manual tracing.' })
+          setExtracting(false)
+          return
+        }
+        setExtractedRoute(route)
+        pointsRef.current = route
+        setPointCount(route.length)
+
+        const map = mapInstanceRef.current
+        if (polylineRef.current) map.removeLayer(polylineRef.current)
+        polylineRef.current = L.polyline(route, { color: '#F59E0B', weight: 4 }).addTo(map)
+        map.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] })
+        setStep('preview')
+        setMsg({ type: 'success', text: `Extracted ${route.length} GPS points from yellow line! Review and save or refine manually.` })
+      } catch (err) {
+        setMsg({ type: 'error', text: 'Extraction failed. Try manual tracing.' })
+      }
+      setExtracting(false)
+    }, 100)
+  }
+
+  // Manual trace mode
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map || step !== 'manual') return
+
+    function onMapClick(e) {
+      const pt = [e.latlng.lat, e.latlng.lng]
+      pointsRef.current.push(pt)
+      setPointCount(pointsRef.current.length)
+      const isFirst = pointsRef.current.length === 1
+      const m = L.circleMarker(pt, { radius: isFirst ? 7 : 4, color: isFirst ? '#22C55E' : '#F59E0B', fillColor: isFirst ? '#22C55E' : '#F59E0B', fillOpacity: 1 }).addTo(map)
+      markersRef.current.push(m)
+      if (polylineRef.current) polylineRef.current.setLatLngs(pointsRef.current)
+      else polylineRef.current = L.polyline(pointsRef.current, { color: '#F59E0B', weight: 4 }).addTo(map)
+    }
+
+    map.on('click', onMapClick)
+    return () => map.off('click', onMapClick)
+  }, [step])
 
   function undoLast() {
     if (!pointsRef.current.length) return
@@ -125,47 +308,143 @@ function RouteTracer({ route, onClose, onSaved }) {
     setPointCount(0)
     markersRef.current.forEach(m => mapInstanceRef.current.removeLayer(m))
     markersRef.current = []
+    cpMarkersRef.current.forEach(m => mapInstanceRef.current.removeLayer(m))
+    cpMarkersRef.current = []
     if (polylineRef.current) { mapInstanceRef.current.removeLayer(polylineRef.current); polylineRef.current = null }
+    setControlPoints([])
+    setExtractedRoute([])
+    setStep('start')
+    setMsg(null)
   }
+
+  // Update PDF overlay opacity
+  useEffect(() => {
+    if (pdfOverlayRef.current) pdfOverlayRef.current.setOpacity(opacity)
+  }, [opacity])
 
   async function saveRoute() {
     if (pointsRef.current.length < 2) { setMsg({ type: 'error', text: 'Need at least 2 points' }); return }
     setSaving(true)
-    const geojson = {
-      type: 'LineString',
-      coordinates: pointsRef.current.map(p => [p[1], p[0]]),
-    }
+    const geojson = { type: 'LineString', coordinates: pointsRef.current.map(p => [p[1], p[0]]) }
     const { error } = await supabase.from('routes').update({ geojson }).eq('id', route.id)
     if (error) setMsg({ type: 'error', text: error.message })
     else { setMsg({ type: 'success', text: 'Route saved!' }); setTimeout(() => { onSaved(); onClose() }, 1000) }
     setSaving(false)
   }
 
+  const completeCPs = controlPoints.filter(cp => cp.gps)
+
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#0A0F1A', zIndex: 9999, display: 'flex', flexDirection: 'column' }}>
       {/* Toolbar */}
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.5)', borderRadius: 8, padding: '6px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'monospace' }}>← Back</button>
         <div style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>Tracing: <span style={{ color: '#F59E0B' }}>{route.name}</span></div>
-        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>{pointCount} points</div>
-        <Btn small onClick={undoLast} disabled={pointCount === 0} color="#FB923C">↩ Undo</Btn>
-        <Btn small danger onClick={clearAll} disabled={pointCount === 0}>Clear</Btn>
-        <Btn small onClick={saveRoute} disabled={pointCount < 2 || saving} color="#22C55E">{saving ? 'Saving…' : '✓ Save Route'}</Btn>
+        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>{pointCount} pts</div>
+
+        {/* Step indicators */}
+        {['start','align','extract','preview','manual'].map((s, i) => (
+          <div key={s} style={{ fontSize: 9, fontFamily: 'monospace', padding: '3px 8px', borderRadius: 6, background: step === s ? 'rgba(245,158,11,0.2)' : 'rgba(255,255,255,0.04)', color: step === s ? '#F59E0B' : 'rgba(255,255,255,0.25)', border: `1px solid ${step === s ? 'rgba(245,158,11,0.4)' : 'rgba(255,255,255,0.06)'}` }}>
+            {i + 1}. {s.toUpperCase()}
+          </div>
+        ))}
+
+        {step === 'manual' && <Btn small color="#FB923C" onClick={undoLast} disabled={pointCount === 0}>↩ Undo</Btn>}
+        <Btn small danger onClick={clearAll} disabled={pointCount === 0 && controlPoints.length === 0}>Clear</Btn>
+        <Btn small onClick={saveRoute} disabled={pointCount < 2 || saving} color="#22C55E">{saving ? 'Saving…' : '✓ Save'}</Btn>
       </div>
 
-      {/* Instructions */}
-      <div style={{ padding: '8px 16px', background: 'rgba(245,158,11,0.06)', borderBottom: '1px solid rgba(245,158,11,0.1)', fontSize: 11, color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace' }}>
-        🟡 Click on the map to place route points · Green dot = start · Undo removes last point
-      </div>
-
+      {/* Status message */}
       {msg && (
-        <div style={{ padding: '8px 16px', background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : '#86EFAC' }}>
+        <div style={{ padding: '8px 16px', background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : msg.type === 'success' ? 'rgba(34,197,94,0.1)' : 'rgba(59,130,246,0.1)', fontSize: 11, color: msg.type === 'error' ? '#FCA5A5' : msg.type === 'success' ? '#86EFAC' : '#93C5FD', fontFamily: 'monospace' }}>
           {msg.text}
         </div>
       )}
 
-      {/* Map */}
-      <div ref={mapRef} style={{ flex: 1 }} />
+      {/* Main content */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+        {/* Left panel — PDF */}
+        <div style={{ width: pdfReady ? 420 : 300, borderRight: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', background: '#0D1421', flexShrink: 0 }}>
+          <div style={{ padding: '12px 14px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', letterSpacing: 1, marginBottom: 8 }}>PDF MAP</div>
+
+            {!pdfReady ? (
+              <div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginBottom: 12, lineHeight: 1.6 }}>
+                  Upload the city-issued PDF route map. The yellow line will be automatically extracted and aligned to GPS coordinates.
+                </div>
+                <label style={{ display: 'block', background: 'rgba(245,158,11,0.1)', border: '1px dashed rgba(245,158,11,0.4)', borderRadius: 10, padding: '20px', textAlign: 'center', cursor: 'pointer', color: '#F59E0B', fontSize: 12, fontWeight: 700, fontFamily: 'monospace' }}>
+                  📄 Upload PDF Map
+                  <input type="file" accept=".pdf" onChange={handlePDFUpload} style={{ display: 'none' }}/>
+                </label>
+                <div style={{ marginTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 12 }}>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 8, fontFamily: 'monospace' }}>OR trace manually:</div>
+                  <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Manual Trace</Btn>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
+                  Control points: {completeCPs.length}/2
+                </div>
+                {step === 'align' && completeCPs.length < 2 && (
+                  <Btn small color="#3B82F6" onClick={() => setCpMode('pdf')}>
+                    {cpMode === 'pdf' ? '🎯 Click intersection on PDF…' : `+ Set Point ${completeCPs.length + 1}`}
+                  </Btn>
+                )}
+                {step === 'extract' && (
+                  <Btn small color="#22C55E" onClick={extractRoute} disabled={extracting}>
+                    {extracting ? 'Extracting…' : '⚡ Auto-Extract Yellow Route'}
+                  </Btn>
+                )}
+                {(step === 'preview' || step === 'extract') && (
+                  <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Refine Manually</Btn>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <label style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>PDF OPACITY</label>
+                  <input type="range" min={0} max={1} step={0.05} value={opacity} onChange={e => setOpacity(Number(e.target.value))} style={{ width: '100%' }}/>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* PDF canvas */}
+          <div style={{ flex: 1, overflow: 'auto', position: 'relative' }}>
+            <canvas
+              ref={canvasRef}
+              onClick={handlePDFClick}
+              style={{ display: pdfReady ? 'block' : 'none', width: '100%', cursor: cpMode === 'pdf' ? 'crosshair' : 'default', border: cpMode === 'pdf' ? '2px solid #3B82F6' : 'none' }}
+            />
+            {!pdfReady && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'rgba(255,255,255,0.15)', fontSize: 12, fontFamily: 'monospace' }}>
+                PDF will appear here
+              </div>
+            )}
+            {/* Control point markers on PDF */}
+            {controlPoints.map((cp, i) => (
+              <div key={i} style={{ position: 'absolute', left: `${(cp.px / (canvasRef.current?.width || 1)) * 100}%`, top: `${(cp.py / (canvasRef.current?.height || 1)) * 100}%`, transform: 'translate(-50%,-50%)', width: 16, height: 16, borderRadius: '50%', background: cp.gps ? '#22C55E' : '#3B82F6', border: '2px solid #fff', pointerEvents: 'none', zIndex: 10 }}>
+                <div style={{ position: 'absolute', top: -18, left: '50%', transform: 'translateX(-50%)', fontSize: 9, color: '#fff', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>P{i + 1}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Right panel — Satellite map */}
+        <div style={{ flex: 1, position: 'relative' }}>
+          {cpMode === 'map' && (
+            <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(59,130,246,0.9)', borderRadius: 8, padding: '6px 14px', fontSize: 11, color: '#fff', fontFamily: 'monospace', fontWeight: 700 }}>
+              🎯 Click the same intersection on the satellite map
+            </div>
+          )}
+          {step === 'manual' && (
+            <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(245,158,11,0.9)', borderRadius: 8, padding: '6px 14px', fontSize: 11, color: '#000', fontFamily: 'monospace', fontWeight: 700 }}>
+              🖊 Click on map to trace route manually
+            </div>
+          )}
+          <div ref={mapRef} style={{ width: '100%', height: '100%' }}/>
+        </div>
+      </div>
     </div>
   )
 }
@@ -223,7 +502,7 @@ function RoutesTab() {
   async function deleteVariant(id) { await supabase.from('schedule_variants').delete().eq('id', id); loadAll() }
   async function deleteRoute(id) { await supabase.from('routes').delete().eq('id', id); loadAll() }
 
-  if (tracingRoute) return <RouteTracer route={tracingRoute} onClose={() => setTracingRoute(null)} onSaved={loadAll} />
+  if (tracingRoute) return <RouteTracer route={tracingRoute} onClose={() => setTracingRoute(null)} onSaved={loadAll}/>
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -231,18 +510,12 @@ function RoutesTab() {
         <SectionTitle>ROUTES ({routes.length})</SectionTitle>
         <Btn small onClick={() => setShowForm(!showForm)}>{showForm ? 'Cancel' : '+ New Route'}</Btn>
       </div>
-
-      {msg && (
-        <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : '#86EFAC' }}>
-          {msg.text}
-        </div>
-      )}
-
+      {msg && <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : '#86EFAC' }}>{msg.text}</div>}
       {showForm && (
         <Card>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Inp label="Route name" placeholder="e.g. Zone 7A · Norris Canyon Rd" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}/>
-            <Inp label="Description (optional)" placeholder="e.g. Commercial district, 2.3 miles" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}/>
+            <Inp label="Description (optional)" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}/>
             {zones.length > 0 && (
               <Sel label="Zone" value={form.zone_id} onChange={e => setForm(f => ({ ...f, zone_id: e.target.value }))}>
                 {zones.map(z => <option key={z.id} value={z.id}>{z.name} — {z.city}</option>)}
@@ -252,7 +525,6 @@ function RoutesTab() {
           </div>
         </Card>
       )}
-
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>Loading routes…</div>
       ) : routes.length === 0 ? (
@@ -271,16 +543,11 @@ function RoutesTab() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <Btn small color="#3B82F6" onClick={() => setTracingRoute(route)}>
-                {route.geojson ? '✎ Edit Route' : '+ Trace Route'}
-              </Btn>
-              <Btn small onClick={() => setExpanded(expanded === route.id ? null : route.id)}>
-                {expanded === route.id ? 'Close' : 'Manage'}
-              </Btn>
+              <Btn small color="#3B82F6" onClick={() => setTracingRoute(route)}>{route.geojson ? '✎ Edit Route' : '+ Trace Route'}</Btn>
+              <Btn small onClick={() => setExpanded(expanded === route.id ? null : route.id)}>{expanded === route.id ? 'Close' : 'Manage'}</Btn>
               <Btn small danger onClick={() => deleteRoute(route.id)}>Delete</Btn>
             </div>
           </div>
-
           {expanded === route.id && (
             <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 14, marginTop: 8 }}>
               <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', letterSpacing: 1, marginBottom: 10 }}>SCHEDULE VARIANTS</div>
@@ -340,11 +607,7 @@ function DriversTab() {
 
   async function createDriver() {
     setSaving(true)
-    const response = await fetch('/api/create-user', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: form.email, password: form.password, full_name: form.full_name, role: form.role, zone_id: form.zone_id }),
-    })
+    const response = await fetch('/api/create-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: form.email, password: form.password, full_name: form.full_name, role: form.role, zone_id: form.zone_id }) })
     const data = await response.json()
     if (!response.ok) setMsg({ type: 'error', text: data.error ?? 'Failed to create user' })
     else { setMsg({ type: 'success', text: `Account created for ${form.full_name}!` }); setForm({ full_name: '', email: '', password: '', role: 'driver', zone_id: '' }); setShowForm(false); loadAll() }
@@ -353,8 +616,7 @@ function DriversTab() {
   }
 
   async function updateRole(profileId, role) { await supabase.from('profiles').update({ role }).eq('id', profileId); loadAll() }
-
-  const roleColor = { driver: '#F59E0B', supervisor: '#3B82F6', admin: '#A855F7' }
+  const roleColor = { driver: '#F59E0B', supervisor: '#3B82F6', admin: '#A855F7', dispatcher: '#14B8A6' }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -362,13 +624,7 @@ function DriversTab() {
         <SectionTitle>TEAM MEMBERS ({drivers.length})</SectionTitle>
         <Btn small onClick={() => setShowForm(!showForm)}>{showForm ? 'Cancel' : '+ New User'}</Btn>
       </div>
-
-      {msg && (
-        <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : '#86EFAC' }}>
-          {msg.text}
-        </div>
-      )}
-
+      {msg && <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : '#86EFAC' }}>{msg.text}</div>}
       {showForm && (
         <Card>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -386,13 +642,10 @@ function DriversTab() {
                 </Sel>
               )}
             </div>
-            <Btn onClick={createDriver} disabled={!form.full_name || !form.email || !form.password || saving}>
-              {saving ? 'Creating…' : 'Create Account'}
-            </Btn>
+            <Btn onClick={createDriver} disabled={!form.full_name || !form.email || !form.password || saving}>{saving ? 'Creating…' : 'Create Account'}</Btn>
           </div>
         </Card>
       )}
-
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>Loading…</div>
       ) : drivers.map(d => (
@@ -458,7 +711,6 @@ function AssignmentsTab() {
   }
 
   async function deleteAssignment(id) { await supabase.from('assignments').delete().eq('id', id); loadAll() }
-
   const statusColor = { pending: '#F59E0B', in_progress: '#3B82F6', completed: '#22C55E', skipped: '#888' }
 
   return (
@@ -467,13 +719,7 @@ function AssignmentsTab() {
         <SectionTitle>ASSIGNMENTS ({assignments.length})</SectionTitle>
         <Btn small onClick={() => setShowForm(!showForm)}>{showForm ? 'Cancel' : '+ New Assignment'}</Btn>
       </div>
-
-      {msg && (
-        <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : '#86EFAC' }}>
-          {msg.text}
-        </div>
-      )}
-
+      {msg && <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : '#86EFAC' }}>{msg.text}</div>}
       {showForm && (
         <Card>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -492,13 +738,10 @@ function AssignmentsTab() {
               </Sel>
             )}
             <Inp label="Date" type="date" value={form.scheduled_date} onChange={e => setForm(f => ({ ...f, scheduled_date: e.target.value }))}/>
-            <Btn onClick={saveAssignment} disabled={!form.driver_id || !form.route_id || saving}>
-              {saving ? 'Saving…' : 'Create Assignment'}
-            </Btn>
+            <Btn onClick={saveAssignment} disabled={!form.driver_id || !form.route_id || saving}>{saving ? 'Saving…' : 'Create Assignment'}</Btn>
           </div>
         </Card>
       )}
-
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>Loading…</div>
       ) : assignments.length === 0 ? (
@@ -527,7 +770,6 @@ function AssignmentsTab() {
 export default function AdminApp() {
   const { profile, signOut } = useAuth()
   const [tab, setTab] = useState('routes')
-
   const tabs = [
     { id: 'routes', label: 'Routes' },
     { id: 'drivers', label: 'Team' },
@@ -544,17 +786,13 @@ export default function AdminApp() {
           </div>
           <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{profile?.full_name}</div>
         </div>
-        <button onClick={signOut} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.45)', borderRadius: 8, padding: '6px 14px', fontSize: 11, cursor: 'pointer', fontFamily: 'monospace' }}>
-          Sign out
-        </button>
+        <button onClick={signOut} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.45)', borderRadius: 8, padding: '6px 14px', fontSize: 11, cursor: 'pointer', fontFamily: 'monospace' }}>Sign out</button>
       </div>
-
       <div style={{ borderBottom: '1px solid rgba(255,255,255,0.07)', padding: '0 24px', display: 'flex', gap: 4 }}>
         {tabs.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{ background: 'none', border: 'none', color: tab === t.id ? '#F59E0B' : 'rgba(255,255,255,0.35)', padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', borderBottom: tab === t.id ? '2px solid #F59E0B' : '2px solid transparent', marginBottom: -1, letterSpacing: 0.3 }}>{t.label}</button>
         ))}
       </div>
-
       <div style={{ maxWidth: 800, margin: '0 auto', padding: '24px' }}>
         {tab === 'routes' && <RoutesTab/>}
         {tab === 'drivers' && <DriversTab/>}
