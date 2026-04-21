@@ -3,7 +3,7 @@ import LoginPage from './pages/LoginPage'
 import DriverApp from './pages/DriverApp'
 import SupervisorApp from './pages/SupervisorApp'
 import AdminApp from './pages/AdminApp'
-import ProcessorApp from './pages/ProcessorApp'
+import DispatcherApp from './pages/DispatcherApp'
 import LoadingScreen from './components/LoadingScreen'
 
 export default function App() {
@@ -17,7 +17,7 @@ export default function App() {
   if (role === 'driver')     return <DriverApp />
   if (role === 'supervisor') return <SupervisorApp />
   if (role === 'admin')      return <AdminApp />
-  if (role === 'processor')  return <ProcessorApp />
+  if (role === 'dispatcher') return <DispatcherApp />
 
   return (
     <div style={{ padding: 32, textAlign: 'center', color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace' }}>
