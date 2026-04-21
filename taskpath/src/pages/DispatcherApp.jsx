@@ -43,7 +43,7 @@ function Btn({ children, onClick, color = '#F59E0B', disabled, small, danger }) 
 
 const STATUS_COLOR = { pending: '#F59E0B', in_progress: '#3B82F6', completed: '#22C55E', paused: '#FB923C', cancelled: '#6B7280', cancelled_due_to_error: '#EF4444' }
 
-export default function ProcessorApp() {
+export default function DispatcherApp {
   const { profile, signOut } = useAuth()
   const [tab, setTab] = useState('assignments')
   const [assignments, setAssignments] = useState([])
@@ -73,7 +73,7 @@ export default function ProcessorApp() {
     const { data } = await supabase
       .from('feature_flags')
       .select('flag_name, enabled')
-      .eq('flag_name', 'processor_route_upload')
+      .eq('flag_name', 'dispatcher_route_upload')
     if (data?.some(f => f.enabled)) setCanUploadRoutes(true)
   }
 
@@ -149,7 +149,7 @@ export default function ProcessorApp() {
         <div>
           <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -0.5 }}>
             Task<span style={{ color: '#F59E0B' }}>Path</span>
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginLeft: 8, letterSpacing: 1 }}>PROCESSOR</span>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginLeft: 8, letterSpacing: 1 }}>DISPATCHER</span>
           </div>
           <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{profile?.full_name}</div>
         </div>
