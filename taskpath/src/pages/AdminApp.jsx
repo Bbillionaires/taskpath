@@ -230,6 +230,9 @@ function RouteTracer({ route, onClose, onSaved }) {
     let roads = []
     try {
       const worker = await createWorker('eng', 1, {
+        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core-simd-lstm.wasm.js',
         logger: m => {
           if (m.status === 'recognizing text') {
             setMsg({ type: 'info', text: `Reading road names from map… ${Math.round((m.progress ?? 0) * 100)}%` })
