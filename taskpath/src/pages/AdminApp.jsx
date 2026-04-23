@@ -371,22 +371,22 @@ function RouteTracer({ route, onClose, onSaved }) {
         <div ref={mapRef} style={{ position: 'absolute', inset: 0 }}/>
 
         {/* PDF canvas overlay — sits on top of map, pointer-events controlled by cpMode */}
-        {pdfReady && (
-          <canvas
-            ref={canvasRef}
-            onClick={handleOverlayClick}
-            style={{
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              opacity: opacity,
-              pointerEvents: cpMode === 'pdf' ? 'auto' : 'none',
-              cursor: cpMode === 'pdf' ? 'crosshair' : 'default',
-              zIndex: 500,
-            }}
-          />
-        )}
+        {/* PDF canvas overlay — always mounted so ref is available before pdfReady */}
+<canvas
+  ref={canvasRef}
+  onClick={handleOverlayClick}
+  style={{
+    position: 'absolute',
+    inset: 0,
+    width: '100%',
+    height: '100%',
+    opacity: pdfReady ? opacity : 0,
+    pointerEvents: pdfReady && cpMode === 'pdf' ? 'auto' : 'none',
+    cursor: cpMode === 'pdf' ? 'crosshair' : 'default',
+    zIndex: 500,
+    display: 'block',
+  }}
+/>
 
         {/* Upload prompt — shown before PDF loaded, centered on map */}
         {!pdfReady && (
