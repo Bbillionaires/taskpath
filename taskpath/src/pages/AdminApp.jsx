@@ -4,6 +4,7 @@ import { useAuth } from '../lib/AuthContext'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import * as pdfjsLib from 'pdfjs-dist'
+import { createWorker } from 'tesseract.js'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -206,42 +207,55 @@ function RouteTracer({ route, onClose, onSaved }) {
     return () => { map.remove(); mapInstanceRef.current = null }
   }, [])
 
-  // ── PDF Upload: render + extract text + auto-geocode ──────────────────
+  // ── PDF Upload: render → Tesseract OCR (handles all PDF types) → geocode ──
   async function handlePDFUpload(e) {
     const file = e.target.files[0]
     if (!file) return
 
     setMsg({ type: 'info', text: 'Rendering PDF…' })
-
     const arrayBuffer = await file.arrayBuffer()
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
     const page = await pdf.getPage(1)
     const scale = 2.5
     const viewport = page.getViewport({ scale })
 
-    // Render to canvas
     const canvas = canvasRef.current
     canvas.width = viewport.width
     canvas.height = viewport.height
-    const ctx = canvas.getContext('2d')
-    await page.render({ canvasContext: ctx, viewport }).promise
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
     setPdfReady(true)
 
-    // Extract text items with pixel positions
-    setMsg({ type: 'info', text: 'Extracting road names from PDF…' })
-    const textContent = await page.getTextContent()
-    const textItems = textContent.items.map(item => ({
-      str: item.str,
-      x: item.transform[4] * scale,
-      y: viewport.height - item.transform[5] * scale, // flip Y axis
-    }))
+    // Tesseract OCR — reads embedded text, vector text, and scanned images
+    setMsg({ type: 'info', text: 'Scanning map for road names…' })
+    let roads = []
+    try {
+      const worker = await createWorker('eng', 1, {
+        logger: m => {
+          if (m.status === 'recognizing text') {
+            setMsg({ type: 'info', text: `Reading road names from map… ${Math.round((m.progress ?? 0) * 100)}%` })
+          }
+        }
+      })
+      const { data } = await worker.recognize(canvas)
+      await worker.terminate()
 
-    const roads = extractRoadNames(textItems, viewport.height)
+      // Line-level keeps "El Camino Real" together instead of splitting word-by-word
+      const ocrItems = data.lines.map(line => ({
+        str: line.text.trim(),
+        x: (line.bbox.x0 + line.bbox.x1) / 2,
+        y: (line.bbox.y0 + line.bbox.y1) / 2,
+      })).filter(i => i.str.length > 2)
 
-    if (roads.length === 0) {
-      setPdfReady(true)
+      roads = extractRoadNames(ocrItems, viewport.height)
+    } catch {
       setStep('align')
-      setMsg({ type: 'error', text: 'No road names found in PDF text. Set control points manually or trace manually.' })
+      setMsg({ type: 'error', text: 'OCR failed. Set control points manually or trace manually.' })
+      return
+    }
+
+    if (roads.length < 2) {
+      setStep('align')
+      setMsg({ type: 'error', text: `Only found ${roads.length} road name(s) — need at least 2. Set control points manually or trace manually.` })
       return
     }
 
