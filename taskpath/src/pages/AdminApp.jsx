@@ -116,7 +116,50 @@ function extractYellowRoute(canvas, controlPoints) {
   return simplifyPoints(gpsPath, 0.00005)
 }
 
-// ── Route Tracer with PDF Overlay ─────────────────────────────────────────
+// ── Road name extraction from PDF text ────────────────────────────────────
+const ROAD_RE = /\b([A-Z][a-zA-Z\s]{2,40}(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Road|Rd|Lane|Ln|Way|Court|Ct|Place|Pl|Parkway|Pkwy|Highway|Hwy|Circle|Cir|Terrace|Ter|Trail|Run|Loop|Path)\.?)\b/g
+
+function extractRoadNames(textItems, canvasHeight) {
+  const found = new Map()
+  for (const item of textItems) {
+    if (!item.str || item.str.trim().length < 4) continue
+    const matches = [...item.str.matchAll(ROAD_RE)]
+    for (const m of matches) {
+      const name = m[1].trim()
+      const key = name.toLowerCase()
+      if (!found.has(key)) {
+        found.set(key, { name, x: item.x, y: item.y })
+      }
+    }
+    // Also catch short labels like "Oak St" by checking suffix words
+    const shortMatch = item.str.trim().match(/^([A-Z][a-zA-Z\s]{1,30}(?:St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl|Pkwy|Hwy|Cir))\.?$/)
+    if (shortMatch) {
+      const name = shortMatch[1].trim()
+      const key = name.toLowerCase()
+      if (!found.has(key)) {
+        found.set(key, { name, x: item.x, y: item.y })
+      }
+    }
+  }
+  return [...found.values()]
+}
+
+// ── Nominatim geocoder (rate-limited) ─────────────────────────────────────
+async function geocodeRoad(roadName, cityHint) {
+  const query = `${roadName}, ${cityHint}`
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&addressdetails=0`
+    const res = await fetch(url, { headers: { 'User-Agent': 'TaskPath-RouteTracer/1.0' } })
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!data.length) return null
+    return [parseFloat(data[0].lat), parseFloat(data[0].lon)]
+  } catch {
+    return null
+  }
+}
+
+// ── Route Tracer ───────────────────────────────────────────────────────────
 function RouteTracer({ route, onClose, onSaved }) {
   const mapRef = useRef(null)
   const mapInstanceRef = useRef(null)
@@ -134,8 +177,11 @@ function RouteTracer({ route, onClose, onSaved }) {
   const [opacity, setOpacity] = useState(0.5)
   const [pdfReady, setPdfReady] = useState(false)
   const [controlPoints, setControlPoints] = useState([])
-  const [cpMode, setCpMode] = useState(null) // 'pdf' | 'map' | null
+  const [cpMode, setCpMode] = useState(null)
   const [extracting, setExtracting] = useState(false)
+  const [roadMatches, setRoadMatches] = useState([]) // [{name, x, y, gps}]
+  const [geocodingProgress, setGeocodingProgress] = useState(null) // {done, total}
+  const [geocodingDone, setGeocodingDone] = useState(false)
 
   // Init Leaflet map
   useEffect(() => {
@@ -160,24 +206,108 @@ function RouteTracer({ route, onClose, onSaved }) {
     return () => { map.remove(); mapInstanceRef.current = null }
   }, [])
 
+  // ── PDF Upload: render + extract text + auto-geocode ──────────────────
   async function handlePDFUpload(e) {
     const file = e.target.files[0]
     if (!file) return
+
+    setMsg({ type: 'info', text: 'Rendering PDF…' })
+
     const arrayBuffer = await file.arrayBuffer()
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
     const page = await pdf.getPage(1)
-    const viewport = page.getViewport({ scale: 2.5 })
+    const scale = 2.5
+    const viewport = page.getViewport({ scale })
+
+    // Render to canvas
     const canvas = canvasRef.current
     canvas.width = viewport.width
     canvas.height = viewport.height
     const ctx = canvas.getContext('2d')
     await page.render({ canvasContext: ctx, viewport }).promise
     setPdfReady(true)
-    setStep('align')
-    setMsg({ type: 'info', text: 'PDF loaded and overlaid on map. Use the opacity slider to blend. Click "+ Set Point 1" then click the SAME intersection on both layers.' })
+
+    // Extract text items with pixel positions
+    setMsg({ type: 'info', text: 'Extracting road names from PDF…' })
+    const textContent = await page.getTextContent()
+    const textItems = textContent.items.map(item => ({
+      str: item.str,
+      x: item.transform[4] * scale,
+      y: viewport.height - item.transform[5] * scale, // flip Y axis
+    }))
+
+    const roads = extractRoadNames(textItems, viewport.height)
+
+    if (roads.length === 0) {
+      setPdfReady(true)
+      setStep('align')
+      setMsg({ type: 'error', text: 'No road names found in PDF text. Set control points manually or trace manually.' })
+      return
+    }
+
+    setMsg({ type: 'info', text: `Found ${roads.length} road names. Matching to satellite map…` })
+    setStep('geocoding')
+
+    // Geocode each road — Nominatim needs 1 req/sec
+    const cityHint = route.zones?.city
+      ? `${route.zones.city}, ${route.zones.state ?? 'FL'}`
+      : 'Jacksonville, FL'
+
+    const matched = []
+    const toGeocode = roads.slice(0, 10) // cap at 10 to avoid long waits
+
+    for (let i = 0; i < toGeocode.length; i++) {
+      setGeocodingProgress({ done: i, total: toGeocode.length, current: toGeocode[i].name })
+      const gps = await geocodeRoad(toGeocode[i].name, cityHint)
+      if (gps) matched.push({ ...toGeocode[i], gps })
+      if (i < toGeocode.length - 1) await new Promise(r => setTimeout(r, 1100)) // rate limit
+    }
+
+    setGeocodingProgress(null)
+    setGeocodingDone(true)
+
+    if (matched.length < 2) {
+      setStep('align')
+      setMsg({ type: 'error', text: `Only matched ${matched.length} road${matched.length === 1 ? '' : 's'} — need at least 2. Set control points manually, or check that the zone city is correct.` })
+      return
+    }
+
+    // Plot matched roads on map as green dots
+    const map = mapInstanceRef.current
+    matched.forEach((r, i) => {
+      const marker = L.circleMarker(r.gps, {
+        radius: 9, color: '#22C55E', fillColor: '#22C55E', fillOpacity: 0.9, weight: 2
+      }).addTo(map)
+      marker.bindTooltip(r.name, { permanent: false, direction: 'top' })
+      cpMarkersRef.current.push(marker)
+    })
+
+    // Pan map to matched area
+    const bounds = L.latLngBounds(matched.map(r => r.gps))
+    map.fitBounds(bounds, { padding: [60, 60] })
+
+    setRoadMatches(matched)
+
+    // Use best 2 spread-out control points (pick first + most-distant from first)
+    const p1 = matched[0]
+    let p2 = matched[1]
+    let maxDist = 0
+    for (const r of matched.slice(1)) {
+      const d = Math.sqrt((r.gps[0] - p1.gps[0]) ** 2 + (r.gps[1] - p1.gps[1]) ** 2)
+      if (d > maxDist) { maxDist = d; p2 = r }
+    }
+
+    const cps = [
+      { id: 0, px: p1.x, py: p1.y, gps: p1.gps, name: p1.name },
+      { id: 1, px: p2.x, py: p2.y, gps: p2.gps, name: p2.name },
+    ]
+    setControlPoints(cps)
+
+    setStep('extract')
+    setMsg({ type: 'success', text: `Matched ${matched.length} roads to satellite map! Ready to auto-extract route.` })
   }
 
-  // Click on the overlay canvas = PDF click
+  // Click on overlay canvas = PDF click for manual CP
   function handleOverlayClick(e) {
     if (cpMode !== 'pdf') return
     const canvas = canvasRef.current
@@ -186,18 +316,16 @@ function RouteTracer({ route, onClose, onSaved }) {
     const scaleY = canvas.height / rect.height
     const px = (e.clientX - rect.left) * scaleX
     const py = (e.clientY - rect.top) * scaleY
-
     const newCp = { px, py, gps: null, id: controlPoints.length }
     setControlPoints(prev => [...prev, newCp])
     setCpMode('map')
-    setMsg({ type: 'info', text: `Point ${controlPoints.length + 1} marked on PDF. Now click the exact same intersection on the satellite map below.` })
+    setMsg({ type: 'info', text: `Point ${controlPoints.length + 1} marked on PDF. Now click the same intersection on the satellite map.` })
   }
 
-  // Map clicks for GPS control points or manual tracing
+  // Map click handler — manual CPs or manual tracing
   useEffect(() => {
     const map = mapInstanceRef.current
     if (!map) return
-
     function onMapClick(e) {
       const { lat, lng } = e.latlng
 
@@ -207,25 +335,20 @@ function RouteTracer({ route, onClose, onSaved }) {
           const last = updated[updated.length - 1]
           if (last && !last.gps) {
             last.gps = [lat, lng]
-            const marker = L.circleMarker([lat, lng], {
-              radius: 10, color: '#22C55E', fillColor: '#22C55E', fillOpacity: 1,
-              weight: 3
-            }).addTo(map)
-            marker.bindTooltip(`P${updated.length}`, { permanent: true, direction: 'top', className: 'cp-label' })
+            const marker = L.circleMarker([lat, lng], { radius: 10, color: '#22C55E', fillColor: '#22C55E', fillOpacity: 1, weight: 3 }).addTo(map)
+            marker.bindTooltip(`P${updated.length}`, { permanent: true, direction: 'top' })
             cpMarkersRef.current.push(marker)
           }
           return updated
         })
-
         setControlPoints(prev => {
           const completedCount = prev.filter(cp => cp.gps).length
           if (completedCount >= 2) {
-            setCpMode(null)
-            setStep('extract')
-            setMsg({ type: 'success', text: '2 control points set! Click "Auto-Extract Yellow Route" to detect the route.' })
+            setCpMode(null); setStep('extract')
+            setMsg({ type: 'success', text: '2 control points set! Click Auto-Extract to detect the route.' })
           } else {
             setCpMode('pdf')
-            setMsg({ type: 'info', text: `Good! Now set Point ${completedCount + 1} — click on the PDF overlay first.` })
+            setMsg({ type: 'info', text: `Good! Now set Point ${completedCount + 1} — click PDF overlay first.` })
           }
           return prev
         })
@@ -243,22 +366,20 @@ function RouteTracer({ route, onClose, onSaved }) {
         else polylineRef.current = L.polyline(pointsRef.current, { color: '#F59E0B', weight: 4 }).addTo(map)
       }
     }
-
     map.on('click', onMapClick)
     return () => map.off('click', onMapClick)
   }, [cpMode, step])
 
   function extractRoute() {
     const completeCPs = controlPoints.filter(cp => cp.gps)
-    if (completeCPs.length < 2) { setMsg({ type: 'error', text: 'Need 2 complete control points first.' }); return }
+    if (completeCPs.length < 2) { setMsg({ type: 'error', text: 'Need 2 control points first.' }); return }
     setExtracting(true)
     setTimeout(() => {
       try {
         const extracted = extractYellowRoute(canvasRef.current, completeCPs)
         if (extracted.length < 5) {
-          setMsg({ type: 'error', text: 'Could not detect yellow route. Try repositioning control points or use manual tracing.' })
-          setExtracting(false)
-          return
+          setMsg({ type: 'error', text: 'No yellow route detected. Try manual tracing.' })
+          setExtracting(false); return
         }
         pointsRef.current = extracted
         setPointCount(extracted.length)
@@ -267,8 +388,8 @@ function RouteTracer({ route, onClose, onSaved }) {
         polylineRef.current = L.polyline(extracted, { color: '#F59E0B', weight: 4 }).addTo(map)
         map.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] })
         setStep('preview')
-        setMsg({ type: 'success', text: `Extracted ${extracted.length} GPS points! Review the yellow line on the map, then save or refine manually.` })
-      } catch (err) {
+        setMsg({ type: 'success', text: `Extracted ${extracted.length} GPS points! Review the yellow line, then save or refine manually.` })
+      } catch {
         setMsg({ type: 'error', text: 'Extraction failed. Try manual tracing.' })
       }
       setExtracting(false)
@@ -293,9 +414,11 @@ function RouteTracer({ route, onClose, onSaved }) {
     cpMarkersRef.current = []
     if (polylineRef.current) { mapInstanceRef.current.removeLayer(polylineRef.current); polylineRef.current = null }
     setControlPoints([])
+    setRoadMatches([])
     setStep(pdfReady ? 'align' : 'start')
     setMsg(null)
     setCpMode(null)
+    setGeocodingDone(false)
   }
 
   async function saveRoute() {
@@ -318,16 +441,8 @@ function RouteTracer({ route, onClose, onSaved }) {
         <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.5)', borderRadius: 8, padding: '6px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'monospace' }}>← Back</button>
         <div style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>Tracing: <span style={{ color: '#F59E0B' }}>{route.name}</span></div>
         <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>{pointCount} pts</div>
-
-        {/* Step pills */}
-        {['start','align','extract','preview','manual'].map((s, i) => (
-          <div key={s} style={{ fontSize: 9, fontFamily: 'monospace', padding: '3px 8px', borderRadius: 6, background: step === s ? 'rgba(245,158,11,0.2)' : 'rgba(255,255,255,0.04)', color: step === s ? '#F59E0B' : 'rgba(255,255,255,0.25)', border: `1px solid ${step === s ? 'rgba(245,158,11,0.4)' : 'rgba(255,255,255,0.06)'}` }}>
-            {i + 1}. {s.toUpperCase()}
-          </div>
-        ))}
-
         {step === 'manual' && <Btn small color="#FB923C" onClick={undoLast} disabled={pointCount === 0}>↩ Undo</Btn>}
-        <Btn small danger onClick={clearAll} disabled={pointCount === 0 && controlPoints.length === 0}>Clear</Btn>
+        <Btn small danger onClick={clearAll} disabled={pointCount === 0 && controlPoints.length === 0 && !pdfReady}>Clear</Btn>
         <Btn small onClick={saveRoute} disabled={pointCount < 2 || saving} color="#22C55E">{saving ? 'Saving…' : '✓ Save'}</Btn>
       </div>
 
@@ -338,74 +453,114 @@ function RouteTracer({ route, onClose, onSaved }) {
         </div>
       )}
 
+      {/* Geocoding progress bar */}
+      {geocodingProgress && (
+        <div style={{ padding: '6px 16px', background: '#0D1421', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
+              MATCHING: {geocodingProgress.current}
+            </span>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
+              {geocodingProgress.done}/{geocodingProgress.total}
+            </span>
+          </div>
+          <div style={{ height: 3, background: 'rgba(255,255,255,0.08)', borderRadius: 2 }}>
+            <div style={{ height: '100%', background: '#22C55E', borderRadius: 2, width: `${(geocodingProgress.done / geocodingProgress.total) * 100}%`, transition: 'width 0.3s' }}/>
+          </div>
+        </div>
+      )}
+
+      {/* Road matches panel — shown after geocoding */}
+      {roadMatches.length > 0 && (
+        <div style={{ padding: '6px 16px', background: '#0D1421', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>AUTO-MATCHED ROADS:</span>
+          {roadMatches.map((r, i) => (
+            <span key={i} style={{ fontSize: 10, background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.3)', color: '#86EFAC', borderRadius: 5, padding: '2px 7px', fontFamily: 'monospace' }}>
+              ✓ {r.name}
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* Controls bar — shown after PDF loaded */}
-      {pdfReady && (
+      {pdfReady && step !== 'geocoding' && (
         <div style={{ padding: '8px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: '#0D1421', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>PDF OPACITY</div>
           <input type="range" min={0} max={1} step={0.05} value={opacity}
             onChange={e => setOpacity(Number(e.target.value))}
-            style={{ width: 120 }}/>
+            style={{ width: 100 }}/>
           <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>{Math.round(opacity * 100)}%</div>
           <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.1)' }}/>
-          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>CONTROL POINTS: {completeCPs.length}/2</div>
+
+          {/* Manual CP fallback */}
           {step === 'align' && completeCPs.length < 2 && (
-            <Btn small color="#3B82F6" onClick={() => { setCpMode('pdf'); setMsg({ type: 'info', text: `Click on a recognizable intersection on the PDF overlay (it's on top of the map).` }) }}>
-              {cpMode === 'pdf' ? '🎯 Click PDF overlay now…' : cpMode === 'map' ? '🗺 Click satellite map now…' : `+ Set Point ${completeCPs.length + 1}`}
+            <Btn small color="#3B82F6" onClick={() => { setCpMode('pdf'); setMsg({ type: 'info', text: 'Click a recognizable intersection on the PDF overlay.' }) }}>
+              {cpMode === 'pdf' ? '🎯 Click PDF now…' : cpMode === 'map' ? '🗺 Click satellite now…' : `+ Manual Point ${completeCPs.length + 1}`}
             </Btn>
           )}
+
           {step === 'extract' && (
             <Btn small color="#22C55E" onClick={extractRoute} disabled={extracting}>
               {extracting ? 'Extracting…' : '⚡ Auto-Extract Yellow Route'}
             </Btn>
           )}
+
           {(step === 'preview' || step === 'extract') && (
             <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Refine Manually</Btn>
           )}
         </div>
       )}
 
-      {/* Map area — full width, PDF overlaid on top */}
+      {/* Map area */}
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }} ref={mapContainerRef}>
 
-        {/* Satellite map — fills entire area */}
+        {/* Satellite map */}
         <div ref={mapRef} style={{ position: 'absolute', inset: 0 }}/>
 
-        {/* PDF canvas overlay — sits on top of map, pointer-events controlled by cpMode */}
-        {/* PDF canvas overlay — always mounted so ref is available before pdfReady */}
-<canvas
-  ref={canvasRef}
-  onClick={handleOverlayClick}
-  style={{
-    position: 'absolute',
-    inset: 0,
-    width: '100%',
-    height: '100%',
-    opacity: pdfReady ? opacity : 0,
-    pointerEvents: pdfReady && cpMode === 'pdf' ? 'auto' : 'none',
-    cursor: cpMode === 'pdf' ? 'crosshair' : 'default',
-    zIndex: 500,
-    display: 'block',
-  }}
-/>
+        {/* PDF canvas — always mounted */}
+        <canvas
+          ref={canvasRef}
+          onClick={handleOverlayClick}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            opacity: pdfReady ? opacity : 0,
+            pointerEvents: pdfReady && cpMode === 'pdf' ? 'auto' : 'none',
+            cursor: cpMode === 'pdf' ? 'crosshair' : 'default',
+            zIndex: 500,
+            display: 'block',
+          }}
+        />
 
-        {/* Upload prompt — shown before PDF loaded, centered on map */}
+        {/* Upload prompt — before PDF loaded */}
         {!pdfReady && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 600, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
-            <div style={{ background: 'rgba(13,20,33,0.92)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 16, padding: 28, textAlign: 'center', maxWidth: 340 }}>
-              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)', marginBottom: 16, lineHeight: 1.6 }}>
-                Upload a city-issued PDF route map. It will overlay on the satellite view so you can align and extract the route.
+          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 600 }}>
+            <div style={{ background: 'rgba(13,20,33,0.92)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 16, padding: 28, textAlign: 'center', maxWidth: 360 }}>
+              <div style={{ fontSize: 28, marginBottom: 10 }}>📄</div>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Upload City Route PDF</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginBottom: 20, lineHeight: 1.6 }}>
+                Road names in the PDF are automatically matched to the satellite map — no manual alignment needed.
               </div>
               <label style={{ display: 'block', background: 'rgba(245,158,11,0.15)', border: '1px dashed rgba(245,158,11,0.5)', borderRadius: 10, padding: '18px 24px', cursor: 'pointer', color: '#F59E0B', fontSize: 13, fontWeight: 700, fontFamily: 'monospace', marginBottom: 16 }}>
-                📄 Upload PDF Map
+                📂 Choose PDF Map
                 <input type="file" accept=".pdf" onChange={handlePDFUpload} style={{ display: 'none' }}/>
               </label>
-              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 10 }}>— or —</div>
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', marginBottom: 12 }}>— or skip PDF and —</div>
               <Btn small color="#3B82F6" onClick={() => setStep('manual')}>✎ Trace Manually on Map</Btn>
             </div>
           </div>
         )}
 
-        {/* Active mode indicator */}
+        {/* Geocoding spinner overlay */}
+        {step === 'geocoding' && (
+          <div style={{ position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(13,20,33,0.95)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 10, padding: '10px 20px', fontSize: 12, color: '#86EFAC', fontFamily: 'monospace', textAlign: 'center' }}>
+            🛰 Matching road names to satellite map…
+          </div>
+        )}
+
+        {/* Mode indicators */}
         {cpMode === 'pdf' && (
           <div style={{ position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, background: 'rgba(59,130,246,0.95)', borderRadius: 8, padding: '7px 16px', fontSize: 12, color: '#fff', fontFamily: 'monospace', fontWeight: 700 }}>
             🎯 Click a recognizable intersection on the PDF overlay
@@ -438,7 +593,6 @@ function RoutesTab() {
   const [variantForm, setVariantForm] = useState({ label: '', service_type: '', day_rule: 'weekday', color_code: '#F59E0B' })
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
-  // Zone creation
   const [showZoneForm, setShowZoneForm] = useState(false)
   const [newZone, setNewZone] = useState({ name: '', city: '', state: '' })
   const [savingZone, setSavingZone] = useState(false)
@@ -458,28 +612,15 @@ function RoutesTab() {
 
   async function createZone() {
     setSavingZone(true)
-    const { data, error } = await supabase.from('zones').insert({
-      name: newZone.name,
-      city: newZone.city || 'Jacksonville',
-      state: newZone.state || 'FL'
-    }).select().single()
-    if (!error) {
-      setZones(prev => [...prev, data])
-      setForm(f => ({ ...f, zone_id: data.id }))
-      setNewZone({ name: '', city: '', state: '' })
-      setShowZoneForm(false)
-    }
+    const { data, error } = await supabase.from('zones').insert({ name: newZone.name, city: newZone.city || 'Jacksonville', state: newZone.state || 'FL' }).select().single()
+    if (!error) { setZones(prev => [...prev, data]); setForm(f => ({ ...f, zone_id: data.id })); setNewZone({ name: '', city: '', state: '' }); setShowZoneForm(false) }
     setSavingZone(false)
   }
 
   async function saveRoute() {
     setSaving(true)
     const zoneId = form.zone_id || (zones.length > 0 ? zones[0].id : null)
-    if (!zoneId) {
-      setMsg({ type: 'error', text: 'Please select or create a zone first.' })
-      setSaving(false)
-      return
-    }
+    if (!zoneId) { setMsg({ type: 'error', text: 'Please select or create a zone first.' }); setSaving(false); return }
     const { error } = await supabase.from('routes').insert({ name: form.name, description: form.description, zone_id: zoneId, status: 'active' })
     if (error) setMsg({ type: 'error', text: error.message })
     else { setMsg({ type: 'success', text: 'Route created!' }); setForm({ name: '', description: '', zone_id: '' }); setShowForm(false); loadAll() }
@@ -509,13 +650,10 @@ function RoutesTab() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Inp label="Route name" placeholder="e.g. Zone 7A · Norris Canyon Rd" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}/>
             <Inp label="Description (optional)" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}/>
-
-            {/* Zone selector with inline create */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>ZONE</label>
               <div style={{ display: 'flex', gap: 8 }}>
-                <select value={form.zone_id} onChange={e => setForm(f => ({ ...f, zone_id: e.target.value }))}
-                  style={{ background: '#1A2235', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: '10px 12px', color: '#fff', fontSize: 13, outline: 'none', flex: 1 }}>
+                <select value={form.zone_id} onChange={e => setForm(f => ({ ...f, zone_id: e.target.value }))} style={{ background: '#1A2235', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: '10px 12px', color: '#fff', fontSize: 13, outline: 'none', flex: 1 }}>
                   <option value="">Select zone…</option>
                   {zones.map(z => <option key={z.id} value={z.id}>{z.name} — {z.city}</option>)}
                 </select>
@@ -528,13 +666,10 @@ function RoutesTab() {
                     <Inp label="City" placeholder="Jacksonville" value={newZone.city} onChange={e => setNewZone(z => ({ ...z, city: e.target.value }))}/>
                     <Inp label="State" placeholder="FL" value={newZone.state} onChange={e => setNewZone(z => ({ ...z, state: e.target.value }))}/>
                   </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <Btn small color="#22C55E" onClick={createZone} disabled={!newZone.name || savingZone}>{savingZone ? 'Saving…' : '✓ Create Zone'}</Btn>
-                  </div>
+                  <Btn small color="#22C55E" onClick={createZone} disabled={!newZone.name || savingZone}>{savingZone ? 'Saving…' : '✓ Create Zone'}</Btn>
                 </div>
               )}
             </div>
-
             <Btn onClick={saveRoute} disabled={!form.name || saving}>{saving ? 'Saving…' : 'Create Route'}</Btn>
           </div>
         </Card>
