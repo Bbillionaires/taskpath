@@ -239,18 +239,23 @@ function RouteTracer({ route, onClose, onSaved }) {
           }
         }
       })
-      const { data } = await worker.recognize(canvas)
+      const { data } = await worker.recognize(canvas, {}, { blocks: true })
       await worker.terminate()
 
       // Line-level keeps "El Camino Real" together instead of splitting word-by-word
-      const ocrItems = data.lines.map(line => ({
-        str: line.text.trim(),
-        x: (line.bbox.x0 + line.bbox.x1) / 2,
-        y: (line.bbox.y0 + line.bbox.y1) / 2,
-      })).filter(i => i.str.length > 2)
+      const ocrItems = (data.blocks ?? []).flatMap(block =>
+        block.paragraphs.flatMap(para =>
+          para.lines.map(line => ({
+            str: line.text.trim(),
+            x: (line.bbox.x0 + line.bbox.x1) / 2,
+            y: (line.bbox.y0 + line.bbox.y1) / 2,
+          }))
+        )
+      ).filter(i => i.str.length > 2)
 
       roads = extractRoadNames(ocrItems, viewport.height)
-    } catch {
+    } catch (ocrErr) {
+      console.error('OCR failed:', ocrErr)
       setStep('align')
       setMsg({ type: 'error', text: 'OCR failed. Set control points manually or trace manually.' })
       return
