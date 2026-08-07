@@ -107,13 +107,28 @@ create policy "Users can update own profile"
 create policy "Authenticated users can view zones"
   on zones for select using (auth.role() = 'authenticated');
 
+create policy "Admins and supervisors can manage zones"
+  on zones for all
+  using ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']))
+  with check ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']));
+
 -- Routes: all authenticated users can view active routes
 create policy "Authenticated users can view active routes"
   on routes for select using (auth.role() = 'authenticated' and status = 'active');
 
+create policy "Admins and supervisors can manage routes"
+  on routes for all
+  using ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']))
+  with check ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']));
+
 -- Schedule variants: all authenticated users can view
 create policy "Authenticated users can view variants"
   on schedule_variants for select using (auth.role() = 'authenticated');
+
+create policy "Admins and supervisors can manage variants"
+  on schedule_variants for all
+  using ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']))
+  with check ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']));
 
 -- Assignments: drivers can only see their own assignments
 create policy "Drivers can view own assignments"

@@ -856,7 +856,7 @@ function AssignmentsTab() {
   async function loadAll() {
     setLoading(true)
     const [{ data: a }, { data: r }, { data: d }] = await Promise.all([
-      supabase.from('assignments').select('*, profiles(full_name), routes(name), schedule_variants(label, day_rule)').order('scheduled_date', { ascending: false }).limit(50),
+      supabase.from('assignments').select('*, profiles!assignments_driver_id_fkey(full_name), routes(name), schedule_variants(label, day_rule)').order('scheduled_date', { ascending: false }).limit(50),
       supabase.from('routes').select('*, schedule_variants(*)').eq('status', 'active'),
       supabase.from('profiles').select('*').eq('role', 'driver'),
     ])

@@ -82,7 +82,7 @@ export default function DispatcherApp() {
     const today = new Date().toISOString().split('T')[0]
     const [{ data: a }, { data: r }, { data: d }] = await Promise.all([
       supabase.from('assignments')
-        .select('*, profiles(id,full_name), routes(name), schedule_variants(label,day_rule)')
+        .select('*, profiles!assignments_driver_id_fkey(id,full_name), routes(name), schedule_variants(label,day_rule)')
         .order('scheduled_date', { ascending: false })
         .limit(50),
       supabase.from('routes').select('*, schedule_variants(*)').eq('status', 'active'),
