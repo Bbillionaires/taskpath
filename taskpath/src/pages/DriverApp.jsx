@@ -189,7 +189,7 @@ export default function DriverApp() {
       .in('status', ['pending', 'in_progress'])
       .order('created_at', { ascending: true })
       .limit(1)
-      .single()
+      .maybeSingle()
     if (data) {
       setAssignment(data)
       const v = getTodayVariant(data.schedule_variants ? Array.isArray(data.schedule_variants) ? data.schedule_variants : [data.schedule_variants] : [])

@@ -312,7 +312,7 @@ export default function SupervisorApp() {
     setLoading(true)
     const today = new Date().toISOString().split('T')[0]
     const [{ data: a }, { data: r }, { data: z }, { data: d }, { data: jr }, { data: je }] = await Promise.all([
-      supabase.from('assignments').select('*, profiles(id,full_name,role), routes(id,name,geojson), schedule_variants(label,day_rule)').eq('scheduled_date', today).order('created_at', { ascending: false }),
+      supabase.from('assignments').select('*, profiles!assignments_driver_id_fkey(id,full_name,role), routes(id,name,geojson), schedule_variants(label,day_rule)').eq('scheduled_date', today).order('created_at', { ascending: false }),
       supabase.from('routes').select('*, zones(name), schedule_variants(*)').order('created_at', { ascending: false }),
       supabase.from('zones').select('*').order('name'),
       supabase.from('profiles').select('*').order('full_name'),

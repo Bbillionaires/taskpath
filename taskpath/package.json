@@ -11,7 +11,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.43.1",
     "leaflet": "^1.9.4",
-    "pdfjs-dist": "^5.6.205",
+    "pdfjs-dist": "5.4.54",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-leaflet": "^4.2.1",

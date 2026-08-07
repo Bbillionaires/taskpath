@@ -230,27 +230,32 @@ function RouteTracer({ route, onClose, onSaved }) {
     let roads = []
     try {
       const worker = await createWorker('eng', 1, {
-        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
+        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/worker.min.js',
         langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core-simd-lstm.wasm.js',
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@7/tesseract-core-simd-lstm.wasm.js',
         logger: m => {
           if (m.status === 'recognizing text') {
             setMsg({ type: 'info', text: `Reading road names from map… ${Math.round((m.progress ?? 0) * 100)}%` })
           }
         }
       })
-      const { data } = await worker.recognize(canvas)
+      const { data } = await worker.recognize(canvas, {}, { blocks: true })
       await worker.terminate()
 
       // Line-level keeps "El Camino Real" together instead of splitting word-by-word
-      const ocrItems = data.lines.map(line => ({
-        str: line.text.trim(),
-        x: (line.bbox.x0 + line.bbox.x1) / 2,
-        y: (line.bbox.y0 + line.bbox.y1) / 2,
-      })).filter(i => i.str.length > 2)
+      const ocrItems = (data.blocks ?? []).flatMap(block =>
+        block.paragraphs.flatMap(para =>
+          para.lines.map(line => ({
+            str: line.text.trim(),
+            x: (line.bbox.x0 + line.bbox.x1) / 2,
+            y: (line.bbox.y0 + line.bbox.y1) / 2,
+          }))
+        )
+      ).filter(i => i.str.length > 2)
 
       roads = extractRoadNames(ocrItems, viewport.height)
-    } catch {
+    } catch (ocrErr) {
+      console.error('OCR failed:', ocrErr)
       setStep('align')
       setMsg({ type: 'error', text: 'OCR failed. Set control points manually or trace manually.' })
       return
@@ -851,7 +856,7 @@ function AssignmentsTab() {
   async function loadAll() {
     setLoading(true)
     const [{ data: a }, { data: r }, { data: d }] = await Promise.all([
-      supabase.from('assignments').select('*, profiles(full_name), routes(name), schedule_variants(label, day_rule)').order('scheduled_date', { ascending: false }).limit(50),
+      supabase.from('assignments').select('*, profiles!assignments_driver_id_fkey(full_name), routes(name), schedule_variants(label, day_rule)').order('scheduled_date', { ascending: false }).limit(50),
       supabase.from('routes').select('*, schedule_variants(*)').eq('status', 'active'),
       supabase.from('profiles').select('*').eq('role', 'driver'),
     ])

@@ -96,6 +96,18 @@ alter table schedule_variants enable row level security;
 alter table assignments       enable row level security;
 alter table job_records       enable row level security;
 
+-- Helper to look up the current user's role without recursing into profiles'
+-- own RLS policies (a plain subquery inside a profiles policy would deadlock).
+create or replace function public.current_user_role()
+returns text
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select role from profiles where auth_user_id = auth.uid()
+$$;
+
 -- Profiles: users can read their own profile
 create policy "Users can view own profile"
   on profiles for select using (auth_user_id = auth.uid());
@@ -103,17 +115,37 @@ create policy "Users can view own profile"
 create policy "Users can update own profile"
   on profiles for update using (auth_user_id = auth.uid());
 
+create policy "Admins and supervisors can manage profiles"
+  on profiles for all
+  using (public.current_user_role() = any (array['admin','supervisor']))
+  with check (public.current_user_role() = any (array['admin','supervisor']));
+
 -- Zones: all authenticated users can read zones
 create policy "Authenticated users can view zones"
   on zones for select using (auth.role() = 'authenticated');
+
+create policy "Admins and supervisors can manage zones"
+  on zones for all
+  using ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']))
+  with check ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']));
 
 -- Routes: all authenticated users can view active routes
 create policy "Authenticated users can view active routes"
   on routes for select using (auth.role() = 'authenticated' and status = 'active');
 
+create policy "Admins and supervisors can manage routes"
+  on routes for all
+  using ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']))
+  with check ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']));
+
 -- Schedule variants: all authenticated users can view
 create policy "Authenticated users can view variants"
   on schedule_variants for select using (auth.role() = 'authenticated');
+
+create policy "Admins and supervisors can manage variants"
+  on schedule_variants for all
+  using ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']))
+  with check ((select role from profiles where auth_user_id = auth.uid()) = any (array['admin','supervisor']));
 
 -- Assignments: drivers can only see their own assignments
 create policy "Drivers can view own assignments"
@@ -127,6 +159,11 @@ create policy "Drivers can update own assignments"
   );
 
 -- Job records: drivers can view and insert their own
+create policy "Admins and supervisors can view job records"
+  on job_records for select using (
+    public.current_user_role() = any (array['admin','supervisor'])
+  );
+
 create policy "Drivers can view own job records"
   on job_records for select using (
     driver_id = (select id from profiles where auth_user_id = auth.uid())
