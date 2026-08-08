@@ -1,5 +1,7 @@
+import { Routes, Route } from 'react-router-dom'
 import { useAuth } from './lib/AuthContext'
 import LoginPage from './pages/LoginPage'
+import SignupPage from './pages/SignupPage'
 import DriverApp from './pages/DriverApp'
 import SupervisorApp from './pages/SupervisorApp'
 import AdminApp from './pages/AdminApp'
@@ -7,9 +9,21 @@ import DispatcherApp from './pages/DispatcherApp'
 import LoadingScreen from './components/LoadingScreen'
 
 export default function App() {
-  const { session, profile, loading } = useAuth()
+  const { loading } = useAuth()
 
   if (loading) return <LoadingScreen />
+
+  return (
+    <Routes>
+      <Route path="/signup" element={<SignupPage />} />
+      <Route path="*" element={<AuthGate />} />
+    </Routes>
+  )
+}
+
+function AuthGate() {
+  const { session, profile } = useAuth()
+
   if (!session) return <LoginPage />
   if (!profile) return <LoadingScreen />
 

@@ -1,8 +1,10 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../lib/AuthContext'
 import { supabase } from '../lib/supabase'
 
 export default function LoginPage() {
+  const navigate = useNavigate()
   const { signIn } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -140,6 +142,13 @@ export default function LoginPage() {
               fontSize: 13, cursor: 'pointer', textDecoration: 'underline', marginTop: 4,
             }}>
               Forgot password?
+            </button>
+
+            <button type="button" onClick={() => navigate('/signup')} style={{
+              background: 'none', border: 'none', color: 'rgba(255,255,255,0.35)',
+              fontSize: 13, cursor: 'pointer', textDecoration: 'underline',
+            }}>
+              New business? Create an account
             </button>
           </form>
         )}
