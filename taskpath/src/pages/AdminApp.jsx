@@ -49,15 +49,79 @@ function Btn({ children, onClick, color = '#F59E0B', disabled, small, danger }) 
 // ── Helpers ────────────────────────────────────────────────────────────────
 // Route-highlight color varies by map provider — some use a yellow
 // highlighter style, others (e.g. county transportation dept exports) mark
-// the active route in green, per their own legend. Detect either.
+// the active route in green, red, or whatever their own legend defines. The
+// one constant is that it *stands out* from the mostly grayscale line-work
+// of an ordinary street map, so detect by saturation rather than a fixed hue.
 function isYellow(r, g, b) {
   return r > 160 && g > 140 && b < 100 && r > b + 80 && g > b + 60
 }
-function isGreenRoute(r, g, b) {
-  return g > r + 20 && g > b + 20 && g > 50 && g < 180
+
+// Finds candidate "highlight" colors on the rendered page: saturated pixels
+// (not grayscale line-work, not nearly-white background) grouped into
+// same-hue clusters, filtered down to ones that plausibly trace a route —
+// spanning a meaningful chunk of the page as a thin line, not a small logo
+// or a solid color block like a title banner. Not perfectly reliable on its
+// own (antialiased edges of banners/logos can slip through) — the caller
+// should still confirm with the uploader when more than one turns up.
+function detectHighlightColors(canvas) {
+  const ctx = canvas.getContext('2d')
+  const { width, height } = canvas
+  const { data } = ctx.getImageData(0, 0, width, height)
+  const QUANT = 24
+  const buckets = new Map()
+  for (let y = 0; y < height; y += 2) {
+    for (let x = 0; x < width; x += 2) {
+      const idx = (y * width + x) * 4
+      const r = data[idx], g = data[idx + 1], b = data[idx + 2]
+      const max = Math.max(r, g, b), min = Math.min(r, g, b)
+      const sat = max === 0 ? 0 : (max - min) / max
+      if (sat < 0.35 || max < 60 || max > 250) continue // grayscale or near-white/black
+      const key = `${Math.round(r / QUANT)}_${Math.round(g / QUANT)}_${Math.round(b / QUANT)}`
+      let bucket = buckets.get(key)
+      if (!bucket) { bucket = { count: 0, rSum: 0, gSum: 0, bSum: 0, minX: x, maxX: x, minY: y, maxY: y }; buckets.set(key, bucket) }
+      bucket.count++; bucket.rSum += r; bucket.gSum += g; bucket.bSum += b
+      bucket.minX = Math.min(bucket.minX, x); bucket.maxX = Math.max(bucket.maxX, x)
+      bucket.minY = Math.min(bucket.minY, y); bucket.maxY = Math.max(bucket.maxY, y)
+    }
+  }
+
+  let clusters = [...buckets.values()].map(b => ({
+    r: b.rSum / b.count, g: b.gSum / b.count, b_: b.bSum / b.count,
+    count: b.count, minX: b.minX, maxX: b.maxX, minY: b.minY, maxY: b.maxY,
+  }))
+  clusters.sort((a, b) => b.count - a.count)
+
+  // Merge near-duplicate colors — quantization/antialiasing splits one real
+  // highlight color into several adjacent buckets.
+  const merged = []
+  for (const c of clusters) {
+    const m = merged.find(m => Math.abs(m.r - c.r) < 40 && Math.abs(m.g - c.g) < 40 && Math.abs(m.b_ - c.b_) < 40)
+    if (m) {
+      const total = m.count + c.count
+      m.r = (m.r * m.count + c.r * c.count) / total
+      m.g = (m.g * m.count + c.g * c.count) / total
+      m.b_ = (m.b_ * m.count + c.b_ * c.count) / total
+      m.count = total
+      m.minX = Math.min(m.minX, c.minX); m.maxX = Math.max(m.maxX, c.maxX)
+      m.minY = Math.min(m.minY, c.minY); m.maxY = Math.max(m.maxY, c.maxY)
+    } else merged.push({ ...c })
+  }
+
+  const imgDiag = Math.sqrt(width * width + height * height)
+  return merged
+    .map(m => {
+      const boxW = m.maxX - m.minX, boxH = m.maxY - m.minY
+      const spanRatio = Math.sqrt(boxW * boxW + boxH * boxH) / imgDiag
+      const fillRatio = m.count / (Math.max(1, boxW) * Math.max(1, boxH) / 4)
+      return { r: Math.round(m.r), g: Math.round(m.g), b: Math.round(m.b_), count: m.count, spanRatio, fillRatio }
+    })
+    .filter(c => c.count >= 300 && c.spanRatio >= 0.15 && c.fillRatio <= 0.15)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6)
 }
-function isRouteColor(r, g, b) {
-  return isYellow(r, g, b) || isGreenRoute(r, g, b)
+
+function colorDistance(r, g, b, target) {
+  return Math.abs(r - target.r) + Math.abs(g - target.g) + Math.abs(b - target.b)
 }
 
 function simplifyPoints(points, tolerance = 0.00003) {
@@ -73,18 +137,25 @@ function simplifyPoints(points, tolerance = 0.00003) {
   return result
 }
 
-function extractYellowRoute(canvas, controlPoints) {
+function extractYellowRoute(canvas, controlPoints, targetColor = null) {
   const ctx = canvas.getContext('2d')
   const { width, height } = canvas
   const imageData = ctx.getImageData(0, 0, width, height)
   const data = imageData.data
+
+  // Prefer the color the uploader confirmed (or the sole auto-detected
+  // candidate); fall back to the plain yellow-highlighter check if none was
+  // ever established, e.g. detection found nothing usable on this page.
+  const matchesRoute = targetColor
+    ? (r, g, b) => colorDistance(r, g, b, targetColor) < 90
+    : isYellow
 
   const yellowPixels = []
   for (let y = 0; y < height; y += 2) {
     for (let x = 0; x < width; x += 2) {
       const idx = (y * width + x) * 4
       const r = data[idx], g = data[idx + 1], b = data[idx + 2]
-      if (isRouteColor(r, g, b)) yellowPixels.push([x, y])
+      if (matchesRoute(r, g, b)) yellowPixels.push([x, y])
     }
   }
 
@@ -296,6 +367,8 @@ function RouteTracer({ route, onClose, onSaved }) {
   const [roadMatches, setRoadMatches] = useState([]) // [{name, x, y, gps}]
   const [geocodingProgress, setGeocodingProgress] = useState(null) // {done, total}
   const [geocodingDone, setGeocodingDone] = useState(false)
+  const [routeColorCandidates, setRouteColorCandidates] = useState([]) // [{r,g,b,count}]
+  const [selectedRouteColor, setSelectedRouteColor] = useState(null)
 
   // Init Leaflet map
   useEffect(() => {
@@ -469,6 +542,15 @@ function RouteTracer({ route, onClose, onSaved }) {
     ]
     setControlPoints(cps)
 
+    // Figure out which color actually marks the route on this map. When
+    // there's exactly one plausible candidate, use it without bothering the
+    // uploader; when there's more than one (a map with several highlighted
+    // categories, e.g. current route vs. newly added roads), require them
+    // to confirm which one before extraction runs.
+    const colorCandidates = detectHighlightColors(canvasRef.current)
+    setRouteColorCandidates(colorCandidates)
+    setSelectedRouteColor(colorCandidates.length === 1 ? colorCandidates[0] : null)
+
     setStep('extract')
     setMsg({ type: 'success', text: `Matched ${matched.length} roads to satellite map! Ready to auto-extract route.` })
   }
@@ -542,9 +624,9 @@ function RouteTracer({ route, onClose, onSaved }) {
     setExtracting(true)
     setTimeout(() => {
       try {
-        const extracted = extractYellowRoute(canvasRef.current, completeCPs)
+        const extracted = extractYellowRoute(canvasRef.current, completeCPs, selectedRouteColor)
         if (extracted.length < 5) {
-          setMsg({ type: 'error', text: 'No yellow route detected. Try manual tracing.' })
+          setMsg({ type: 'error', text: 'No route line detected in that color. Try manual tracing.' })
           setExtracting(false); return
         }
         pointsRef.current = extracted
@@ -585,6 +667,8 @@ function RouteTracer({ route, onClose, onSaved }) {
     setMsg(null)
     setCpMode(null)
     setGeocodingDone(false)
+    setRouteColorCandidates([])
+    setSelectedRouteColor(null)
   }
 
   async function saveRoute() {
@@ -648,6 +732,30 @@ function RouteTracer({ route, onClose, onSaved }) {
         </div>
       )}
 
+      {/* Route color picker — shown when the map has more than one highlighted
+          color (e.g. current route vs. newly added roads) and needs the
+          uploader to say which one is the actual route to trace */}
+      {step === 'extract' && routeColorCandidates.length > 1 && (
+        <div style={{ padding: '10px 16px', background: 'rgba(59,130,246,0.08)', borderBottom: '1px solid rgba(59,130,246,0.2)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, color: '#93C5FD', fontFamily: 'monospace' }}>This map has multiple highlighted colors — which one is your route?</span>
+          {routeColorCandidates.map((c, i) => {
+            const rgb = `rgb(${c.r},${c.g},${c.b})`
+            const isSelected = selectedRouteColor && colorDistance(selectedRouteColor.r, selectedRouteColor.g, selectedRouteColor.b, c) === 0
+            return (
+              <button key={i} onClick={() => setSelectedRouteColor(c)} style={{
+                display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                background: isSelected ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.04)',
+                border: isSelected ? '1px solid #fff' : '1px solid rgba(255,255,255,0.15)',
+                borderRadius: 8, padding: '5px 10px', fontSize: 11, color: '#fff', fontFamily: 'monospace',
+              }}>
+                <span style={{ width: 14, height: 14, borderRadius: 4, background: rgb, display: 'inline-block', border: '1px solid rgba(255,255,255,0.3)' }}/>
+                {isSelected ? '✓ ' : ''}Color {i + 1}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       {/* Controls bar — shown after PDF loaded */}
       {pdfReady && step !== 'geocoding' && (
         <div style={{ padding: '8px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: '#0D1421', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -666,8 +774,8 @@ function RouteTracer({ route, onClose, onSaved }) {
           )}
 
           {step === 'extract' && (
-            <Btn small color="#22C55E" onClick={extractRoute} disabled={extracting}>
-              {extracting ? 'Extracting…' : '⚡ Auto-Extract Yellow Route'}
+            <Btn small color="#22C55E" onClick={extractRoute} disabled={extracting || (routeColorCandidates.length > 1 && !selectedRouteColor)}>
+              {extracting ? 'Extracting…' : routeColorCandidates.length > 1 && !selectedRouteColor ? 'Pick a route color above ↑' : '⚡ Auto-Extract Route'}
             </Btn>
           )}
 
