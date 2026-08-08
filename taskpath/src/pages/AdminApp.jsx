@@ -117,6 +117,76 @@ function extractYellowRoute(canvas, controlPoints) {
   return simplifyPoints(gpsPath, 0.00005)
 }
 
+// ── Advanced OCR preprocessing: strips dense parcel/building line-work that
+// confuses OCR on scanned civil-engineering style maps, while preserving
+// bolder text strokes. Adaptive threshold (vs. local mean) handles uneven
+// backgrounds like colored highlight bands; morphological opening (erode
+// then dilate) removes hairline noise a couple pixels wide or thinner. ──
+function preprocessForOCR(srcCanvas) {
+  const w = srcCanvas.width, h = srcCanvas.height
+  const src = srcCanvas.getContext('2d').getImageData(0, 0, w, h)
+  const gray = new Float32Array(w * h)
+  for (let i = 0; i < w * h; i++) {
+    gray[i] = 0.299 * src.data[i * 4] + 0.587 * src.data[i * 4 + 1] + 0.114 * src.data[i * 4 + 2]
+  }
+
+  // Local mean via separable box blur (radius 15)
+  const radius = 15
+  const tmp = new Float32Array(w * h)
+  const mean = new Float32Array(w * h)
+  for (let y = 0; y < h; y++) {
+    let sum = 0
+    const rowOff = y * w
+    for (let x = -radius; x <= radius; x++) sum += gray[rowOff + Math.min(w - 1, Math.max(0, x))]
+    for (let x = 0; x < w; x++) {
+      tmp[rowOff + x] = sum
+      sum += gray[rowOff + Math.min(w - 1, x + radius + 1)] - gray[rowOff + Math.max(0, x - radius)]
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let sum = 0
+    for (let y = -radius; y <= radius; y++) sum += tmp[Math.min(h - 1, Math.max(0, y)) * w + x]
+    for (let y = 0; y < h; y++) {
+      mean[y * w + x] = sum / ((2 * radius + 1) * (2 * radius + 1))
+      sum += tmp[Math.min(h - 1, y + radius + 1) * w + x] - tmp[Math.max(0, y - radius) * w + x]
+    }
+  }
+
+  const C = 12 // sensitivity: pixel counts as ink if this much darker than its local neighborhood
+  let bin = new Uint8Array(w * h)
+  for (let i = 0; i < w * h; i++) bin[i] = gray[i] < mean[i] - C ? 1 : 0
+
+  const erode = src => {
+    const out = new Uint8Array(w * h)
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      out[i] = (src[i] && src[i - 1] && src[i + 1] && src[i - w] && src[i + w]) ? 1 : 0
+    }
+    return out
+  }
+  const dilate = src => {
+    const out = new Uint8Array(w * h)
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      out[i] = (src[i] || src[i - 1] || src[i + 1] || src[i - w] || src[i + w]) ? 1 : 0
+    }
+    return out
+  }
+  const opened = dilate(erode(bin))
+
+  const outCanvas = document.createElement('canvas')
+  outCanvas.width = w
+  outCanvas.height = h
+  const outCtx = outCanvas.getContext('2d')
+  const outImg = outCtx.createImageData(w, h)
+  for (let i = 0; i < w * h; i++) {
+    const v = opened[i] ? 0 : 255
+    outImg.data[i * 4] = v; outImg.data[i * 4 + 1] = v; outImg.data[i * 4 + 2] = v; outImg.data[i * 4 + 3] = 255
+  }
+  outCtx.putImageData(outImg, 0, 0)
+  return outCanvas
+}
+
 // ── Road name extraction from PDF text ────────────────────────────────────
 const ROAD_RE = /\b([A-Z][a-zA-Z\s]{2,40}(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Road|Rd|Lane|Ln|Way|Court|Ct|Place|Pl|Parkway|Pkwy|Highway|Hwy|Circle|Cir|Terrace|Ter|Trail|Run|Loop|Path)\.?)\b/g
 
@@ -239,21 +309,35 @@ function RouteTracer({ route, onClose, onSaved }) {
           }
         }
       })
-      const { data } = await worker.recognize(canvas, {}, { blocks: true })
+
+      const runOCR = async targetCanvas => {
+        const { data } = await worker.recognize(targetCanvas, {}, { blocks: true })
+        // Line-level keeps "El Camino Real" together instead of splitting word-by-word
+        const ocrItems = (data.blocks ?? []).flatMap(block =>
+          block.paragraphs.flatMap(para =>
+            para.lines.map(line => ({
+              str: line.text.trim(),
+              x: (line.bbox.x0 + line.bbox.x1) / 2,
+              y: (line.bbox.y0 + line.bbox.y1) / 2,
+            }))
+          )
+        ).filter(i => i.str.length > 2)
+        return extractRoadNames(ocrItems, viewport.height)
+      }
+
+      roads = await runOCR(canvas)
+
+      // Dense scanned/engineering-style maps (heavy parcel/building line-work)
+      // often defeat OCR on the first pass — retry once against a cleaned-up
+      // version of the same render before giving up to manual entry.
+      if (roads.length < 2) {
+        setMsg({ type: 'info', text: 'Standard scan found too few road names — trying advanced image cleanup…' })
+        const cleaned = preprocessForOCR(canvas)
+        const advancedRoads = await runOCR(cleaned)
+        if (advancedRoads.length > roads.length) roads = advancedRoads
+      }
+
       await worker.terminate()
-
-      // Line-level keeps "El Camino Real" together instead of splitting word-by-word
-      const ocrItems = (data.blocks ?? []).flatMap(block =>
-        block.paragraphs.flatMap(para =>
-          para.lines.map(line => ({
-            str: line.text.trim(),
-            x: (line.bbox.x0 + line.bbox.x1) / 2,
-            y: (line.bbox.y0 + line.bbox.y1) / 2,
-          }))
-        )
-      ).filter(i => i.str.length > 2)
-
-      roads = extractRoadNames(ocrItems, viewport.height)
     } catch (ocrErr) {
       console.error('OCR failed:', ocrErr)
       setStep('align')
@@ -263,7 +347,7 @@ function RouteTracer({ route, onClose, onSaved }) {
 
     if (roads.length < 2) {
       setStep('align')
-      setMsg({ type: 'error', text: `Only found ${roads.length} road name(s) — need at least 2. Set control points manually or trace manually.` })
+      setMsg({ type: 'error', text: `Only found ${roads.length} road name(s) even after advanced cleanup — need at least 2. Set control points manually or trace manually.` })
       return
     }
 
