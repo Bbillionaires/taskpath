@@ -47,8 +47,17 @@ function Btn({ children, onClick, color = '#F59E0B', disabled, small, danger }) 
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+// Route-highlight color varies by map provider — some use a yellow
+// highlighter style, others (e.g. county transportation dept exports) mark
+// the active route in green, per their own legend. Detect either.
 function isYellow(r, g, b) {
   return r > 160 && g > 140 && b < 100 && r > b + 80 && g > b + 60
+}
+function isGreenRoute(r, g, b) {
+  return g > r + 20 && g > b + 20 && g > 50 && g < 180
+}
+function isRouteColor(r, g, b) {
+  return isYellow(r, g, b) || isGreenRoute(r, g, b)
 }
 
 function simplifyPoints(points, tolerance = 0.00003) {
@@ -75,7 +84,7 @@ function extractYellowRoute(canvas, controlPoints) {
     for (let x = 0; x < width; x += 2) {
       const idx = (y * width + x) * 4
       const r = data[idx], g = data[idx + 1], b = data[idx + 2]
-      if (isYellow(r, g, b)) yellowPixels.push([x, y])
+      if (isRouteColor(r, g, b)) yellowPixels.push([x, y])
     }
   }
 
@@ -188,7 +197,9 @@ function preprocessForOCR(srcCanvas) {
 }
 
 // ── Road name extraction from PDF text ────────────────────────────────────
-const ROAD_RE = /\b([A-Z][a-zA-Z\s]{2,40}(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Road|Rd|Lane|Ln|Way|Court|Ct|Place|Pl|Parkway|Pkwy|Highway|Hwy|Circle|Cir|Terrace|Ter|Trail|Run|Loop|Path)\.?)\b/g
+// Case-insensitive: real-world civic/GIS map exports commonly label streets
+// in ALL CAPS (e.g. "JONATHAN AVE"), not just Title Case.
+const ROAD_RE = /\b([A-Z][a-zA-Z\s]{2,40}(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Road|Rd|Lane|Ln|Way|Court|Ct|Place|Pl|Parkway|Pkwy|Highway|Hwy|Circle|Cir|Terrace|Ter|Trail|Run|Loop|Path)\.?)\b/gi
 
 function extractRoadNames(textItems, canvasHeight) {
   const found = new Map()
@@ -203,7 +214,7 @@ function extractRoadNames(textItems, canvasHeight) {
       }
     }
     // Also catch short labels like "Oak St" by checking suffix words
-    const shortMatch = item.str.trim().match(/^([A-Z][a-zA-Z\s]{1,30}(?:St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl|Pkwy|Hwy|Cir))\.?$/)
+    const shortMatch = item.str.trim().match(/^([A-Z][a-zA-Z\s]{1,30}(?:St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl|Pkwy|Hwy|Cir))\.?$/i)
     if (shortMatch) {
       const name = shortMatch[1].trim()
       const key = name.toLowerCase()
@@ -213,6 +224,38 @@ function extractRoadNames(textItems, canvasHeight) {
     }
   }
   return [...found.values()]
+}
+
+// ── Direct PDF text extraction — far more reliable than OCR for the many
+// route maps that are exported as real vector PDFs (with an embedded text
+// layer) rather than scanned images. pdfjs splits each label into several
+// positioned glyph runs; `hasEOL` marks where one label ends and the next
+// begins, so runs are joined until the next hasEOL boundary. Positions are
+// converted from PDF user space into the same canvas-pixel space the OCR
+// path already produces, via the viewport's own transform. ──
+function extractPdfTextLines(textContent, viewport) {
+  const lines = []
+  let current = []
+  let anchor = null
+  for (const item of textContent.items) {
+    if (item.hasEOL) {
+      if (current.length) lines.push({ str: current.join(''), anchor })
+      current = []
+      anchor = null
+      if (item.str) { current.push(item.str); anchor = [item.transform[4], item.transform[5]] }
+      continue
+    }
+    if (anchor === null) anchor = [item.transform[4], item.transform[5]]
+    current.push(item.str)
+  }
+  if (current.length) lines.push({ str: current.join(''), anchor })
+
+  return lines
+    .map(l => {
+      const [x, y] = viewport.convertToViewportPoint(l.anchor[0], l.anchor[1])
+      return { str: l.str.trim(), x, y }
+    })
+    .filter(l => l.str.length > 2)
 }
 
 // ── Nominatim geocoder (rate-limited) ─────────────────────────────────────
@@ -295,59 +338,76 @@ function RouteTracer({ route, onClose, onSaved }) {
     await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
     setPdfReady(true)
 
-    // Tesseract OCR — reads embedded text, vector text, and scanned images
-    setMsg({ type: 'info', text: 'Scanning map for road names…' })
+    // Tier 0: many route maps are exported as real vector PDFs with an
+    // embedded text layer — reading that directly is both faster and far
+    // more accurate than rendering to an image and OCR'ing it. Only fall
+    // through to OCR when there's no usable text layer (scanned/photographed
+    // PDFs) or too few roads turn up in it.
     let roads = []
+    setMsg({ type: 'info', text: 'Reading embedded map text…' })
     try {
-      const worker = await createWorker('eng', 1, {
-        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/worker.min.js',
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@7/tesseract-core-simd-lstm.wasm.js',
-        logger: m => {
-          if (m.status === 'recognizing text') {
-            setMsg({ type: 'info', text: `Reading road names from map… ${Math.round((m.progress ?? 0) * 100)}%` })
+      const textContent = await page.getTextContent()
+      const textLines = extractPdfTextLines(textContent, viewport)
+      roads = extractRoadNames(textLines, viewport.height)
+    } catch (textErr) {
+      console.error('PDF text extraction failed:', textErr)
+    }
+
+    // Tesseract OCR — reads embedded text, vector text, and scanned images.
+    // Only needed when the PDF has no usable embedded text layer (Tier 0).
+    if (roads.length < 2) {
+      setMsg({ type: 'info', text: 'Scanning map for road names…' })
+      try {
+        const worker = await createWorker('eng', 1, {
+          workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/worker.min.js',
+          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+          corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@7/tesseract-core-simd-lstm.wasm.js',
+          logger: m => {
+            if (m.status === 'recognizing text') {
+              setMsg({ type: 'info', text: `Reading road names from map… ${Math.round((m.progress ?? 0) * 100)}%` })
+            }
           }
+        })
+
+        const runOCR = async targetCanvas => {
+          const { data } = await worker.recognize(targetCanvas, {}, { blocks: true })
+          // Line-level keeps "El Camino Real" together instead of splitting word-by-word
+          const ocrItems = (data.blocks ?? []).flatMap(block =>
+            block.paragraphs.flatMap(para =>
+              para.lines.map(line => ({
+                str: line.text.trim(),
+                x: (line.bbox.x0 + line.bbox.x1) / 2,
+                y: (line.bbox.y0 + line.bbox.y1) / 2,
+              }))
+            )
+          ).filter(i => i.str.length > 2)
+          return extractRoadNames(ocrItems, viewport.height)
         }
-      })
 
-      const runOCR = async targetCanvas => {
-        const { data } = await worker.recognize(targetCanvas, {}, { blocks: true })
-        // Line-level keeps "El Camino Real" together instead of splitting word-by-word
-        const ocrItems = (data.blocks ?? []).flatMap(block =>
-          block.paragraphs.flatMap(para =>
-            para.lines.map(line => ({
-              str: line.text.trim(),
-              x: (line.bbox.x0 + line.bbox.x1) / 2,
-              y: (line.bbox.y0 + line.bbox.y1) / 2,
-            }))
-          )
-        ).filter(i => i.str.length > 2)
-        return extractRoadNames(ocrItems, viewport.height)
+        roads = await runOCR(canvas)
+
+        // Dense scanned/engineering-style maps (heavy parcel/building line-work)
+        // often defeat OCR on the first pass — retry once against a cleaned-up
+        // version of the same render before giving up to manual entry.
+        if (roads.length < 2) {
+          setMsg({ type: 'info', text: 'Standard scan found too few road names — trying advanced image cleanup…' })
+          const cleaned = preprocessForOCR(canvas)
+          const advancedRoads = await runOCR(cleaned)
+          if (advancedRoads.length > roads.length) roads = advancedRoads
+        }
+
+        await worker.terminate()
+      } catch (ocrErr) {
+        console.error('OCR failed:', ocrErr)
+        setStep('align')
+        setMsg({ type: 'error', text: 'OCR failed. Set control points manually or trace manually.' })
+        return
       }
-
-      roads = await runOCR(canvas)
-
-      // Dense scanned/engineering-style maps (heavy parcel/building line-work)
-      // often defeat OCR on the first pass — retry once against a cleaned-up
-      // version of the same render before giving up to manual entry.
-      if (roads.length < 2) {
-        setMsg({ type: 'info', text: 'Standard scan found too few road names — trying advanced image cleanup…' })
-        const cleaned = preprocessForOCR(canvas)
-        const advancedRoads = await runOCR(cleaned)
-        if (advancedRoads.length > roads.length) roads = advancedRoads
-      }
-
-      await worker.terminate()
-    } catch (ocrErr) {
-      console.error('OCR failed:', ocrErr)
-      setStep('align')
-      setMsg({ type: 'error', text: 'OCR failed. Set control points manually or trace manually.' })
-      return
     }
 
     if (roads.length < 2) {
       setStep('align')
-      setMsg({ type: 'error', text: `Only found ${roads.length} road name(s) even after advanced cleanup — need at least 2. Set control points manually or trace manually.` })
+      setMsg({ type: 'error', text: `Only found ${roads.length} road name(s) even after OCR — need at least 2. Set control points manually or trace manually.` })
       return
     }
 
@@ -708,7 +768,7 @@ function RoutesTab() {
   async function loadAll() {
     setLoading(true)
     const [{ data: r }, { data: z }] = await Promise.all([
-      supabase.from('routes').select('*, zones(name), schedule_variants(*)').order('created_at', { ascending: false }),
+      supabase.from('routes').select('*, zones(name, city, state), schedule_variants(*)').order('created_at', { ascending: false }),
       supabase.from('zones').select('*').order('name'),
     ])
     setRoutes(r ?? [])
