@@ -411,12 +411,42 @@ function RouteTracer({ route, onClose, onSaved }) {
     await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
     setPdfReady(true)
 
+    const cityHint = route.zones?.city
+      ? `${route.zones.city}, ${route.zones.state ?? 'FL'}`
+      : 'Jacksonville, FL'
+
+    // Geocode candidate road names — Nominatim needs 1 req/sec. Returns the
+    // matches; the caller decides whether that's enough to stop here or move
+    // on to a stronger extraction tier. A tier can produce ≥2 *text* matches
+    // that are still garbage (OCR misreads that happen to end in "Ln"/"Rd")
+    // and fail to geocode — that's exactly the case a later tier should get
+    // a chance to fix, not just a hard stop.
+    async function geocodeCandidates(candidates) {
+      const toGeocode = candidates.slice(0, 10) // cap at 10 to avoid long waits
+      const result = []
+      for (let i = 0; i < toGeocode.length; i++) {
+        setGeocodingProgress({ done: i, total: toGeocode.length, current: toGeocode[i].name })
+        const gps = await geocodeRoad(toGeocode[i].name, cityHint)
+        if (gps) result.push({ ...toGeocode[i], gps })
+        if (i < toGeocode.length - 1) await new Promise(r => setTimeout(r, 1100)) // rate limit
+      }
+      return result
+    }
+
+    async function tryTier(candidateRoads) {
+      if (candidateRoads.length < 2) return []
+      setMsg({ type: 'info', text: `Found ${candidateRoads.length} road names. Matching to satellite map…` })
+      setStep('geocoding')
+      return geocodeCandidates(candidateRoads)
+    }
+
     // Tier 0: many route maps are exported as real vector PDFs with an
     // embedded text layer — reading that directly is both faster and far
     // more accurate than rendering to an image and OCR'ing it. Only fall
-    // through to OCR when there's no usable text layer (scanned/photographed
-    // PDFs) or too few roads turn up in it.
+    // through to OCR when this doesn't turn up at least 2 roads that
+    // actually geocode.
     let roads = []
+    let matched = []
     setMsg({ type: 'info', text: 'Reading embedded map text…' })
     try {
       const textContent = await page.getTextContent()
@@ -425,10 +455,10 @@ function RouteTracer({ route, onClose, onSaved }) {
     } catch (textErr) {
       console.error('PDF text extraction failed:', textErr)
     }
+    matched = await tryTier(roads)
 
     // Tesseract OCR — reads embedded text, vector text, and scanned images.
-    // Only needed when the PDF has no usable embedded text layer (Tier 0).
-    if (roads.length < 2) {
+    if (matched.length < 2) {
       setMsg({ type: 'info', text: 'Scanning map for road names…' })
       try {
         const worker = await createWorker('eng', 1, {
@@ -457,49 +487,30 @@ function RouteTracer({ route, onClose, onSaved }) {
           return extractRoadNames(ocrItems, viewport.height)
         }
 
-        roads = await runOCR(canvas)
+        const ocrRoads = await runOCR(canvas)
+        const ocrMatched = await tryTier(ocrRoads)
+        if (ocrMatched.length > matched.length) { matched = ocrMatched; roads = ocrRoads }
 
         // Dense scanned/engineering-style maps (heavy parcel/building line-work)
         // often defeat OCR on the first pass — retry once against a cleaned-up
         // version of the same render before giving up to manual entry.
-        if (roads.length < 2) {
-          setMsg({ type: 'info', text: 'Standard scan found too few road names — trying advanced image cleanup…' })
+        if (matched.length < 2) {
+          setMsg({ type: 'info', text: 'Standard scan found too few good matches — trying advanced image cleanup…' })
           const cleaned = preprocessForOCR(canvas)
           const advancedRoads = await runOCR(cleaned)
-          if (advancedRoads.length > roads.length) roads = advancedRoads
+          const advancedMatched = await tryTier(advancedRoads)
+          if (advancedMatched.length > matched.length) { matched = advancedMatched; roads = advancedRoads }
         }
 
         await worker.terminate()
       } catch (ocrErr) {
         console.error('OCR failed:', ocrErr)
-        setStep('align')
-        setMsg({ type: 'error', text: 'OCR failed. Set control points manually or trace manually.' })
-        return
+        if (matched.length < 2) {
+          setStep('align')
+          setMsg({ type: 'error', text: 'OCR failed. Set control points manually or trace manually.' })
+          return
+        }
       }
-    }
-
-    if (roads.length < 2) {
-      setStep('align')
-      setMsg({ type: 'error', text: `Only found ${roads.length} road name(s) even after OCR — need at least 2. Set control points manually or trace manually.` })
-      return
-    }
-
-    setMsg({ type: 'info', text: `Found ${roads.length} road names. Matching to satellite map…` })
-    setStep('geocoding')
-
-    // Geocode each road — Nominatim needs 1 req/sec
-    const cityHint = route.zones?.city
-      ? `${route.zones.city}, ${route.zones.state ?? 'FL'}`
-      : 'Jacksonville, FL'
-
-    const matched = []
-    const toGeocode = roads.slice(0, 10) // cap at 10 to avoid long waits
-
-    for (let i = 0; i < toGeocode.length; i++) {
-      setGeocodingProgress({ done: i, total: toGeocode.length, current: toGeocode[i].name })
-      const gps = await geocodeRoad(toGeocode[i].name, cityHint)
-      if (gps) matched.push({ ...toGeocode[i], gps })
-      if (i < toGeocode.length - 1) await new Promise(r => setTimeout(r, 1100)) // rate limit
     }
 
     setGeocodingProgress(null)
@@ -507,7 +518,7 @@ function RouteTracer({ route, onClose, onSaved }) {
 
     if (matched.length < 2) {
       setStep('align')
-      setMsg({ type: 'error', text: `Only matched ${matched.length} road${matched.length === 1 ? '' : 's'} — need at least 2. Set control points manually, or check that the zone city is correct.` })
+      setMsg({ type: 'error', text: `Only matched ${matched.length} road${matched.length === 1 ? '' : 's'} across ${roads.length} found — need at least 2. Set control points manually, or check that the zone city is correct.` })
       return
     }
 
