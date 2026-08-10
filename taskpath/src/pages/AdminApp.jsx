@@ -1041,7 +1041,8 @@ function DriversTab() {
 
   async function createDriver() {
     setSaving(true)
-    const response = await fetch('/api/create-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: form.email, password: form.password, full_name: form.full_name, role: form.role, zone_id: form.zone_id }) })
+    const { data: { session } } = await supabase.auth.getSession()
+    const response = await fetch('/api/create-user', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token}` }, body: JSON.stringify({ email: form.email, password: form.password, full_name: form.full_name, role: form.role, zone_id: form.zone_id }) })
     const data = await response.json()
     if (!response.ok) setMsg({ type: 'error', text: data.error ?? 'Failed to create user' })
     else { setMsg({ type: 'success', text: `Account created for ${form.full_name}!` }); setForm({ full_name: '', email: '', password: '', role: 'driver', zone_id: '' }); setShowForm(false); loadAll() }

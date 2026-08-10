@@ -378,7 +378,8 @@ export default function SupervisorApp() {
 
   async function createTeamUser() {
     setAddSaving(true)
-    const res = await fetch('/api/create-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...addForm, created_by: profile.id }) })
+    const { data: { session } } = await supabase.auth.getSession()
+    const res = await fetch('/api/create-user', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token}` }, body: JSON.stringify({ ...addForm, created_by: profile.id }) })
     const data = await res.json()
     if (!res.ok) setAddMsg({ type: 'error', text: data.error ?? 'Failed to create user' })
     else { setAddMsg({ type: 'success', text: `Account created for ${addForm.full_name}!` }); setAddForm({ full_name: '', email: '', password: '', role: 'driver' }); setShowAddUser(false); loadAll() }
