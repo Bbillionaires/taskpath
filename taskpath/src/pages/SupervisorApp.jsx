@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { addSatelliteTiles } from '../lib/mapTiles'
 
 const STATUS_CONFIG = {
   pending:                { color: '#F59E0B', label: 'Pending' },
@@ -86,7 +87,7 @@ function RouteTracer({ route, onClose, onSaved }) {
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return
     const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([30.3322, -81.6557], 14)
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 }).addTo(map)
+    addSatelliteTiles(map)
 
     if (route.geojson) {
       try {
@@ -175,7 +176,7 @@ function SupervisorMap({ assignments, driverLocations, jobRecords }) {
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return
     const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([30.3322, -81.6557], 12)
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 }).addTo(map)
+    addSatelliteTiles(map)
     mapInstanceRef.current = map
     return () => { map.remove(); mapInstanceRef.current = null }
   }, [])

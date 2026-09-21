@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { addSatelliteTiles } from '../lib/mapTiles'
 
 // Fix Leaflet default marker icon issue with Vite
 delete L.Icon.Default.prototype._getIconUrl
@@ -43,20 +44,8 @@ export default function RouteMap({ geojson, gpsPos, sweptCoords = [] }) {
       attributionControl: true,
     })
 
-    // Satellite tiles (ESRI)
-    L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      {
-        attribution: 'Tiles © Esri',
-        maxZoom: 19,
-      }
-    ).addTo(map)
-
-    // Street label overlay
-    L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 19, opacity: 0.6 }
-    ).addTo(map)
+    // Satellite tiles + labeled roads overlay, with OSM fallback on tile failure
+    addSatelliteTiles(map, { maxZoom: 19 })
 
     // Full route line (yellow — unswept)
     L.polyline(latLngs, {
