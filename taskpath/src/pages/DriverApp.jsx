@@ -3,6 +3,51 @@ import RouteMap from '../components/RouteMap'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
 import { getIndustryCopy } from '../lib/industryCopy'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import { addSatelliteTiles } from '../lib/mapTiles'
+
+const PROPERTY_STATUS_COLORS = { pending: '#F59E0B', in_progress: '#3B82F6', completed: '#22C55E', skipped: '#6B7280' }
+const PROPERTY_STATUSES = ['pending', 'in_progress', 'completed', 'skipped']
+
+function PropertiesMap({ properties, pos }) {
+  const mapRef = useRef(null)
+  const mapInstanceRef = useRef(null)
+  const layersRef = useRef({})
+
+  useEffect(() => {
+    if (!mapRef.current || mapInstanceRef.current) return
+    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([30.3322, -81.6557], 13)
+    addSatelliteTiles(map)
+    mapInstanceRef.current = map
+    return () => { map.remove(); mapInstanceRef.current = null }
+  }, [])
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map) return
+    Object.keys(layersRef.current).filter(k => k.startsWith('prop_')).forEach(k => { map.removeLayer(layersRef.current[k]); delete layersRef.current[k] })
+    const withCoords = properties.filter(p => p.lat != null && p.lng != null)
+    withCoords.forEach(p => {
+      layersRef.current[`prop_${p.id}`] = L.circleMarker([p.lat, p.lng], {
+        radius: 9, color: '#fff', weight: 2,
+        fillColor: PROPERTY_STATUS_COLORS[p.status] ?? '#888', fillOpacity: 1,
+      }).addTo(map).bindPopup(p.address)
+    })
+    if (withCoords.length > 0) {
+      try { map.fitBounds(L.latLngBounds(withCoords.map(p => [p.lat, p.lng])), { padding: [40, 40] }) } catch (e) {}
+    }
+  }, [properties])
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map || !pos) return
+    if (layersRef.current.me) layersRef.current.me.setLatLng([pos.lat, pos.lng])
+    else layersRef.current.me = L.circleMarker([pos.lat, pos.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#F59E0B', fillOpacity: 1 }).addTo(map)
+  }, [pos])
+
+  return <div ref={mapRef} style={{ width: '100%', height: 240, borderRadius: 12 }}/>
+}
 
 const VARIANT_COLORS = {
   weekday:  { bg: '#1E3A5F', border: '#3B82F6', text: '#93C5FD' },
@@ -114,7 +159,10 @@ function EditJobModal({ job, onClose, onSaved }) {
 
 export default function DriverApp() {
   const { profile, signOut } = useAuth()
-  const industryCopy = getIndustryCopy(profile?.companies?.industry)
+  const industry = profile?.companies?.industry
+  const industryCopy = getIndustryCopy(industry)
+  const needsProperties = ['lawn', 'tree', 'delivery'].includes(industry)
+  const isPropertyOnly = ['lawn', 'tree'].includes(industry)
   const [screen, setScreen] = useState('home')
   const [assignment, setAssignment] = useState(null)
   const [variant, setVariant] = useState(null)
@@ -125,10 +173,12 @@ export default function DriverApp() {
   const [currentPass, setCurrentPass] = useState(1)
   const passesRequired = variant?.passes_required ?? industryCopy.passesRequired
   const [records, setRecords] = useState([])
+  const [properties, setProperties] = useState([])
   const [loading, setLoading] = useState(true)
   const [editingJob, setEditingJob] = useState(null)
   const [driverEditEnabled, setDriverEditEnabled] = useState(false)
-  const { pos, error: gpsError } = useGPS(jobActive)
+  const hasActiveProperty = properties.some(p => p.status === 'in_progress')
+  const { pos, error: gpsError } = useGPS(jobActive || hasActiveProperty)
   const timerRef = useRef(null)
   const gpsTrackRef = useRef([])
 
@@ -144,6 +194,7 @@ export default function DriverApp() {
     loadRecentRecords()
     loadProfile()
     checkEditFlag()
+    if (needsProperties) loadTodayProperties()
   }, [])
 
   async function checkEditFlag() {
@@ -159,14 +210,14 @@ export default function DriverApp() {
   useEffect(() => {
     if (!pos) return
     if (jobActive) gpsTrackRef.current.push({ lat: pos.lat, lng: pos.lng, heading: pos.heading, ts: Date.now() })
-    if (assignment) {
+    if (assignment || hasActiveProperty) {
       supabase.from('driver_locations').upsert({
-        driver_id: profile.id, assignment_id: assignment.id,
+        driver_id: profile.id, assignment_id: assignment?.id ?? null,
         lat: pos.lat, lng: pos.lng, heading: pos.heading, accuracy: pos.accuracy,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'driver_id' })
     }
-  }, [pos, jobActive])
+  }, [pos, jobActive, hasActiveProperty])
 
   async function loadProfile() {
     const { data } = await supabase.from('profiles').select('*').eq('id', profile.id).single()
@@ -200,6 +251,23 @@ export default function DriverApp() {
       setVariant(v)
     }
     setLoading(false)
+  }
+
+  async function loadTodayProperties() {
+    const today = new Date().toISOString().split('T')[0]
+    const { data } = await supabase
+      .from('properties')
+      .select('*')
+      .eq('assigned_to', profile.id)
+      .eq('scheduled_date', today)
+      .order('created_at', { ascending: true })
+    setProperties(data ?? [])
+  }
+
+  async function advancePropertyStatus(p) {
+    const next = PROPERTY_STATUSES[(PROPERTY_STATUSES.indexOf(p.status) + 1) % PROPERTY_STATUSES.length]
+    await supabase.from('properties').update({ status: next, completed_at: next === 'completed' ? new Date().toISOString() : null }).eq('id', p.id)
+    loadTodayProperties()
   }
 
   async function loadRecentRecords() {
@@ -297,6 +365,14 @@ export default function DriverApp() {
         <div style={{ padding: 14, flex: 1, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto' }}>
           {loading ? (
             <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.3)' }}>Loading assignment…</div>
+          ) : isPropertyOnly ? (
+            <div style={{ background: 'linear-gradient(135deg,rgba(245,158,11,0.1),rgba(234,88,12,0.05))', border: '1px solid rgba(245,158,11,0.14)', borderRadius: 16, padding: 20 }}>
+              <div style={{ fontSize: 9, fontFamily: 'monospace', color: 'rgba(255,255,255,0.4)', letterSpacing: 1.5, marginBottom: 6 }}>TODAY'S PROPERTIES</div>
+              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>
+                {properties.length === 0 ? 'No properties scheduled' : `${properties.filter(p => p.status === 'completed').length} of ${properties.length} completed`}
+              </div>
+              <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={() => setScreen('properties')}>View Properties →</button>
+            </div>
           ) : assignment ? (
             <>
               <div style={{ background: 'linear-gradient(135deg,rgba(245,158,11,0.1),rgba(234,88,12,0.05))', border: '1px solid rgba(245,158,11,0.14)', borderRadius: 16, padding: 20 }}>
@@ -421,6 +497,42 @@ export default function DriverApp() {
         </div>
       )}
 
+      {/* PROPERTIES */}
+      {screen === 'properties' && (
+        <div style={{ padding: 14, flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 11 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', letterSpacing: 1 }}>
+            TODAY'S PROPERTIES · {properties.filter(p => p.status === 'completed').length}/{properties.length} complete
+          </div>
+          {properties.length > 0 && <PropertiesMap properties={properties} pos={pos}/>}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ width: 7, height: 7, borderRadius: '50%', background: pos ? '#22C55E' : 'rgba(255,255,255,0.2)', boxShadow: pos ? '0 0 8px #22C55E' : 'none', flexShrink: 0 }}/>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace' }}>
+              {pos ? 'GPS active' : 'GPS activates once a property is in progress'}
+            </span>
+          </div>
+          {properties.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '60px 16px', color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>
+              No properties scheduled for today.
+              <div style={{ fontSize: 11, fontFamily: 'monospace', marginTop: 6 }}>Contact your supervisor.</div>
+            </div>
+          ) : properties.map(p => (
+            <div key={p.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '13px 15px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 5 }}>{p.address}</div>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: PROPERTY_STATUS_COLORS[p.status], background: `${PROPERTY_STATUS_COLORS[p.status]}18`, border: `1px solid ${PROPERTY_STATUS_COLORS[p.status]}40`, borderRadius: 6, padding: '2px 8px', fontFamily: 'monospace', letterSpacing: 0.5 }}>
+                    {p.status.replace('_', ' ').toUpperCase()}
+                  </span>
+                </div>
+                <button onClick={() => advancePropertyStatus(p)} style={{ background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 9, color: '#F59E0B', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'monospace', padding: '8px 12px', whiteSpace: 'nowrap' }}>
+                  Advance →
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* PROFILE */}
       {screen === 'profile' && (
         <div style={{ padding: 14, flex: 1, overflow: 'auto' }}>
@@ -456,7 +568,8 @@ export default function DriverApp() {
       <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', background: '#0A0F1A' }}>
         {[
           { id: 'home', icon: '⌂', l: 'Home' },
-          { id: 'map', icon: '◉', l: 'Map' },
+          ...(isPropertyOnly ? [] : [{ id: 'map', icon: '◉', l: 'Map' }]),
+          ...(needsProperties ? [{ id: 'properties', icon: '⚑', l: 'Properties' }] : []),
           { id: 'records', icon: '≡', l: 'History' },
           { id: 'profile', icon: '◎', l: 'Profile' },
         ].map(t => (

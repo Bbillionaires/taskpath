@@ -5,6 +5,10 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { addSatelliteTiles } from '../lib/mapTiles'
 import { getIndustryCopy } from '../lib/industryCopy'
+import { geocodeAddress } from '../lib/geocode'
+
+const PROPERTY_STATUS_COLORS = { pending: '#F59E0B', in_progress: '#3B82F6', completed: '#22C55E', skipped: '#6B7280' }
+const PROPERTY_STATUSES = ['pending', 'in_progress', 'completed', 'skipped']
 
 const STATUS_CONFIG = {
   pending:                { color: '#F59E0B', label: 'Pending' },
@@ -169,7 +173,7 @@ function RouteTracer({ route, onClose, onSaved }) {
 }
 
 // ── Supervisor Live Map ────────────────────────────────────────────────────
-function SupervisorMap({ assignments, driverLocations, jobRecords }) {
+function SupervisorMap({ assignments, driverLocations, jobRecords, properties = [] }) {
   const mapRef = useRef(null)
   const mapInstanceRef = useRef(null)
   const layersRef = useRef({})
@@ -221,6 +225,19 @@ function SupervisorMap({ assignments, driverLocations, jobRecords }) {
       })
     })
   }, [jobRecords])
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map) return
+    Object.keys(layersRef.current).filter(k => k.startsWith('prop_')).forEach(k => { map.removeLayer(layersRef.current[k]); delete layersRef.current[k] })
+    properties.filter(p => p.lat != null && p.lng != null).forEach(p => {
+      const marker = L.circleMarker([p.lat, p.lng], {
+        radius: 8, color: '#fff', weight: 2,
+        fillColor: PROPERTY_STATUS_COLORS[p.status] ?? '#888', fillOpacity: 1,
+      }).addTo(map).bindPopup(`${p.address}<br/><b>${p.status}</b>`)
+      layersRef.current[`prop_${p.id}`] = marker
+    })
+  }, [properties])
 
   useEffect(() => {
     const map = mapInstanceRef.current
@@ -279,6 +296,13 @@ export default function SupervisorApp() {
   const [routeSaving, setRouteSaving] = useState(false)
   const [routeMsg, setRouteMsg] = useState(null)
 
+  // Properties
+  const [properties, setProperties] = useState([])
+  const [showPropertyForm, setShowPropertyForm] = useState(false)
+  const [propertyForm, setPropertyForm] = useState({ address: '', zone_id: '', assigned_to: '', scheduled_date: new Date().toISOString().split('T')[0], notes: '' })
+  const [propertySaving, setPropertySaving] = useState(false)
+  const [propertyMsg, setPropertyMsg] = useState(null)
+
   // New team user form
   const [showAddUser, setShowAddUser] = useState(false)
   const [addForm, setAddForm] = useState({ full_name: '', email: '', password: '', role: 'driver' })
@@ -314,13 +338,14 @@ export default function SupervisorApp() {
   async function loadAll() {
     setLoading(true)
     const today = new Date().toISOString().split('T')[0]
-    const [{ data: a }, { data: r }, { data: z }, { data: d }, { data: jr }, { data: je }] = await Promise.all([
+    const [{ data: a }, { data: r }, { data: z }, { data: d }, { data: jr }, { data: je }, { data: p }] = await Promise.all([
       supabase.from('assignments').select('*, profiles!assignments_driver_id_fkey(id,full_name,role), routes(id,name,geojson), schedule_variants(label,day_rule)').eq('scheduled_date', today).order('created_at', { ascending: false }),
       supabase.from('routes').select('*, zones(name), schedule_variants(*)').order('created_at', { ascending: false }),
       supabase.from('zones').select('*').order('name'),
       supabase.from('profiles').select('*').order('full_name'),
       supabase.from('job_records').select('*, routes(name), profiles(full_name)').gte('started_at', new Date(Date.now() - 24 * 3600 * 1000).toISOString()).order('started_at', { ascending: false }),
       supabase.from('job_edits').select('*, profiles(full_name), job_records(*)').order('created_at', { ascending: false }).limit(100),
+      supabase.from('properties').select('*, zones(name), profiles!properties_assigned_to_fkey(full_name)').order('scheduled_date', { ascending: false }).order('created_at', { ascending: false }),
     ])
     setAssignments(a ?? [])
     setRoutes(r ?? [])
@@ -328,6 +353,7 @@ export default function SupervisorApp() {
     setDrivers(d ?? [])
     setJobRecords(jr ?? [])
     setJobEdits(je ?? [])
+    setProperties(p ?? [])
     const forms = {}
     ;(d ?? []).forEach(dr => {
       forms[dr.id] = { vehicle_tag: dr.vehicle_tag ?? '', insurance_policy: dr.insurance_policy ?? '', vehicle_make_model: dr.vehicle_make_model ?? '', vehicle_owner: dr.vehicle_owner ?? '', vehicle_company: dr.vehicle_company ?? '', scheduled_hours: dr.scheduled_hours ?? '', pay_rate: dr.pay_rate ?? '', notes: dr.notes ?? '' }
@@ -346,6 +372,34 @@ export default function SupervisorApp() {
     await supabase.from('assignments').update({ status }).eq('id', assignmentId)
     loadAll()
   }
+
+  async function saveProperty() {
+    if (!propertyForm.address.trim()) return
+    setPropertySaving(true)
+    setPropertyMsg({ type: 'info', text: 'Looking up address…' })
+    const geo = await geocodeAddress(propertyForm.address)
+    if (!geo) setPropertyMsg({ type: 'error', text: 'Could not find that address. Property saved without map coordinates — you can edit it later.' })
+    const { error } = await supabase.from('properties').insert({
+      address: propertyForm.address, zone_id: propertyForm.zone_id || null,
+      assigned_to: propertyForm.assigned_to || null, scheduled_date: propertyForm.scheduled_date || null,
+      notes: propertyForm.notes || null, lat: geo?.lat ?? null, lng: geo?.lng ?? null,
+    })
+    if (error) setPropertyMsg({ type: 'error', text: error.message })
+    else if (geo) setPropertyMsg({ type: 'success', text: 'Property added!' })
+    setPropertyForm({ address: '', zone_id: '', assigned_to: '', scheduled_date: new Date().toISOString().split('T')[0], notes: '' })
+    setShowPropertyForm(false)
+    setPropertySaving(false)
+    await loadAll()
+    setTimeout(() => setPropertyMsg(null), 4000)
+  }
+
+  async function cyclePropertyStatus(p) {
+    const next = PROPERTY_STATUSES[(PROPERTY_STATUSES.indexOf(p.status) + 1) % PROPERTY_STATUSES.length]
+    await supabase.from('properties').update({ status: next, completed_at: next === 'completed' ? new Date().toISOString() : null }).eq('id', p.id)
+    loadAll()
+  }
+
+  async function deleteProperty(id) { await supabase.from('properties').delete().eq('id', id); loadAll() }
 
   async function saveDriverProfile(driverId) {
     setSavingProfile(driverId)
@@ -431,10 +485,15 @@ export default function SupervisorApp() {
 
   if (tracingRoute) return <RouteTracer route={tracingRoute} onClose={() => setTracingRoute(null)} onSaved={loadAll} />
 
+  const industry = profile?.companies?.industry
+  const isPropertyOnly = ['lawn', 'tree'].includes(industry)
+  const needsRoutes = !isPropertyOnly
+  const needsProperties = ['lawn', 'tree', 'delivery'].includes(industry)
   const allTabs = [
     { id: 'live', label: 'Live Map' },
-    { id: 'assignments', label: 'Assignments' },
-    { id: 'routes', label: 'Routes' },
+    ...(needsRoutes ? [{ id: 'assignments', label: 'Assignments' }] : []),
+    ...(needsRoutes ? [{ id: 'routes', label: 'Routes' }] : []),
+    ...(needsProperties ? [{ id: 'properties', label: 'Properties' }] : []),
     { id: 'drivers', label: 'Drivers' },
     { id: 'team', label: 'Team' },
     { id: 'editlog', label: 'Edit Log' },
@@ -519,7 +578,7 @@ export default function SupervisorApp() {
             </div>
           </div>
           <div style={{ flex: 1, padding: 16 }}>
-            <SupervisorMap assignments={assignments} driverLocations={driverLocations} jobRecords={jobRecords}/>
+            <SupervisorMap assignments={assignments} driverLocations={driverLocations} jobRecords={jobRecords} properties={properties}/>
           </div>
         </div>
       )}
@@ -641,6 +700,60 @@ export default function SupervisorApp() {
                   <Btn small onClick={() => addVariant(route.id)} disabled={!variantForm.label || !variantForm.service_type}>+ Add Variant</Btn>
                 </div>
               )}
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* PROPERTIES TAB */}
+      {tab === 'properties' && (
+        <div style={{ maxWidth: 800, margin: '0 auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace', letterSpacing: 1.5 }}>PROPERTIES ({properties.length})</div>
+            <Btn small onClick={() => setShowPropertyForm(!showPropertyForm)}>{showPropertyForm ? 'Cancel' : '+ New Property'}</Btn>
+          </div>
+          {propertyMsg && <div style={{ background: propertyMsg.type === 'error' ? 'rgba(239,68,68,0.1)' : propertyMsg.type === 'success' ? 'rgba(34,197,94,0.1)' : 'rgba(59,130,246,0.1)', border: `1px solid ${propertyMsg.type === 'error' ? 'rgba(239,68,68,0.3)' : propertyMsg.type === 'success' ? 'rgba(34,197,94,0.3)' : 'rgba(59,130,246,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: propertyMsg.type === 'error' ? '#FCA5A5' : propertyMsg.type === 'success' ? '#86EFAC' : '#93C5FD' }}>{propertyMsg.text}</div>}
+          {showPropertyForm && (
+            <Card>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Inp label="Address" placeholder="e.g. 123 Main St, San Ramon, CA" value={propertyForm.address} onChange={e => setPropertyForm(f => ({ ...f, address: e.target.value }))}/>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <Sel label="Zone (optional)" value={propertyForm.zone_id} onChange={e => setPropertyForm(f => ({ ...f, zone_id: e.target.value }))}>
+                    <option value="">No zone</option>
+                    {zones.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
+                  </Sel>
+                  <Sel label="Assign to" value={propertyForm.assigned_to} onChange={e => setPropertyForm(f => ({ ...f, assigned_to: e.target.value }))}>
+                    <option value="">Unassigned</option>
+                    {drivers.filter(d => d.role === 'driver').map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+                  </Sel>
+                  <Inp label="Scheduled date" type="date" value={propertyForm.scheduled_date} onChange={e => setPropertyForm(f => ({ ...f, scheduled_date: e.target.value }))}/>
+                  <Inp label="Notes (optional)" value={propertyForm.notes} onChange={e => setPropertyForm(f => ({ ...f, notes: e.target.value }))}/>
+                </div>
+                <Btn onClick={saveProperty} disabled={!propertyForm.address.trim() || propertySaving}>{propertySaving ? 'Saving…' : 'Add Property'}</Btn>
+              </div>
+            </Card>
+          )}
+          {properties.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>No properties yet.</div>
+          ) : properties.map(p => (
+            <Card key={p.id}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{p.address}</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <Badge label={p.status.replace('_', ' ')} color={PROPERTY_STATUS_COLORS[p.status]}/>
+                    {p.zones && <Badge label={p.zones.name} color="#3B82F6"/>}
+                    {p.scheduled_date && <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>{p.scheduled_date}</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 6 }}>
+                    {p.profiles?.full_name ? `Assigned to ${p.profiles.full_name}` : 'Unassigned'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  <Btn small onClick={() => cyclePropertyStatus(p)}>Advance Status</Btn>
+                  <Btn small danger onClick={() => deleteProperty(p.id)}>Delete</Btn>
+                </div>
+              </div>
             </Card>
           ))}
         </div>

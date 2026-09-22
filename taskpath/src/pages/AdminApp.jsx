@@ -5,6 +5,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { addSatelliteTiles } from '../lib/mapTiles'
 import { getIndustryCopy } from '../lib/industryCopy'
+import { geocodeAddress } from '../lib/geocode'
 import * as pdfjsLib from 'pdfjs-dist'
 import { createWorker } from 'tesseract.js'
 
@@ -1023,6 +1024,155 @@ function RoutesTab() {
   )
 }
 
+// ── Properties Tab ─────────────────────────────────────────────────────────
+const PROPERTY_STATUS_COLORS = { pending: '#F59E0B', in_progress: '#3B82F6', completed: '#22C55E', skipped: '#6B7280' }
+const PROPERTY_STATUSES = ['pending', 'in_progress', 'completed', 'skipped']
+
+function PropertiesMap({ properties }) {
+  const mapRef = useRef(null)
+  const mapInstanceRef = useRef(null)
+  const markersRef = useRef([])
+
+  useEffect(() => {
+    if (!mapRef.current || mapInstanceRef.current) return
+    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([30.3322, -81.6557], 12)
+    addSatelliteTiles(map)
+    mapInstanceRef.current = map
+    return () => { map.remove(); mapInstanceRef.current = null }
+  }, [])
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map) return
+    markersRef.current.forEach(m => map.removeLayer(m))
+    markersRef.current = []
+    const withCoords = properties.filter(p => p.lat != null && p.lng != null)
+    withCoords.forEach(p => {
+      const marker = L.circleMarker([p.lat, p.lng], {
+        radius: 8, color: '#fff', weight: 2,
+        fillColor: PROPERTY_STATUS_COLORS[p.status] ?? '#888', fillOpacity: 1,
+      }).addTo(map).bindPopup(`${p.address}<br/><b>${p.status}</b>`)
+      markersRef.current.push(marker)
+    })
+    if (withCoords.length > 0) {
+      try { map.fitBounds(L.latLngBounds(withCoords.map(p => [p.lat, p.lng])), { padding: [40, 40] }) } catch (e) {}
+    }
+  }, [properties])
+
+  return <div ref={mapRef} style={{ width: '100%', height: 260, borderRadius: 12 }}/>
+}
+
+function PropertiesTab() {
+  const { profile } = useAuth()
+  const [properties, setProperties] = useState([])
+  const [zones, setZones] = useState([])
+  const [drivers, setDrivers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [form, setForm] = useState({ address: '', zone_id: '', assigned_to: '', scheduled_date: new Date().toISOString().split('T')[0], notes: '' })
+
+  useEffect(() => { loadAll() }, [])
+
+  async function loadAll() {
+    setLoading(true)
+    const [{ data: p }, { data: z }, { data: d }] = await Promise.all([
+      supabase.from('properties').select('*, zones(name), profiles!properties_assigned_to_fkey(full_name)').order('scheduled_date', { ascending: false }).order('created_at', { ascending: false }),
+      supabase.from('zones').select('*').order('name'),
+      supabase.from('profiles').select('id, full_name').eq('role', 'driver').order('full_name'),
+    ])
+    setProperties(p ?? [])
+    setZones(z ?? [])
+    setDrivers(d ?? [])
+    setLoading(false)
+  }
+
+  async function saveProperty() {
+    if (!form.address.trim()) return
+    setSaving(true)
+    setMsg({ type: 'info', text: 'Looking up address…' })
+    const geo = await geocodeAddress(form.address)
+    if (!geo) setMsg({ type: 'error', text: 'Could not find that address. Property saved without map coordinates — you can edit it later.' })
+    const { error } = await supabase.from('properties').insert({
+      address: form.address, zone_id: form.zone_id || null,
+      assigned_to: form.assigned_to || null, scheduled_date: form.scheduled_date || null,
+      notes: form.notes || null, lat: geo?.lat ?? null, lng: geo?.lng ?? null,
+    })
+    if (error) setMsg({ type: 'error', text: error.message })
+    else if (geo) setMsg({ type: 'success', text: 'Property added!' })
+    setForm({ address: '', zone_id: '', assigned_to: '', scheduled_date: new Date().toISOString().split('T')[0], notes: '' })
+    setShowForm(false)
+    setSaving(false)
+    await loadAll()
+    setTimeout(() => setMsg(null), 4000)
+  }
+
+  async function cycleStatus(p) {
+    const next = PROPERTY_STATUSES[(PROPERTY_STATUSES.indexOf(p.status) + 1) % PROPERTY_STATUSES.length]
+    await supabase.from('properties').update({ status: next, completed_at: next === 'completed' ? new Date().toISOString() : null }).eq('id', p.id)
+    loadAll()
+  }
+
+  async function deleteProperty(id) { await supabase.from('properties').delete().eq('id', id); loadAll() }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <SectionTitle>PROPERTIES ({properties.length})</SectionTitle>
+        <Btn small onClick={() => setShowForm(!showForm)}>{showForm ? 'Cancel' : '+ New Property'}</Btn>
+      </div>
+      {msg && <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : msg.type === 'success' ? 'rgba(34,197,94,0.1)' : 'rgba(59,130,246,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : msg.type === 'success' ? 'rgba(34,197,94,0.3)' : 'rgba(59,130,246,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : msg.type === 'success' ? '#86EFAC' : '#93C5FD' }}>{msg.text}</div>}
+      {showForm && (
+        <Card>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Inp label="Address" placeholder="e.g. 123 Main St, San Ramon, CA" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))}/>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <Sel label="Zone (optional)" value={form.zone_id} onChange={e => setForm(f => ({ ...f, zone_id: e.target.value }))}>
+                <option value="">No zone</option>
+                {zones.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
+              </Sel>
+              <Sel label="Assign to" value={form.assigned_to} onChange={e => setForm(f => ({ ...f, assigned_to: e.target.value }))}>
+                <option value="">Unassigned</option>
+                {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+              </Sel>
+              <Inp label="Scheduled date" type="date" value={form.scheduled_date} onChange={e => setForm(f => ({ ...f, scheduled_date: e.target.value }))}/>
+              <Inp label="Notes (optional)" value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}/>
+            </div>
+            <Btn onClick={saveProperty} disabled={!form.address.trim() || saving}>{saving ? 'Saving…' : 'Add Property'}</Btn>
+          </div>
+        </Card>
+      )}
+      {properties.length > 0 && <PropertiesMap properties={properties}/>}
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>Loading properties…</div>
+      ) : properties.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>No properties yet.</div>
+      ) : properties.map(p => (
+        <Card key={p.id}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{p.address}</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Badge label={p.status.replace('_', ' ')} color={PROPERTY_STATUS_COLORS[p.status]}/>
+                {p.zones && <Badge label={p.zones.name} color="#3B82F6"/>}
+                {p.scheduled_date && <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>{p.scheduled_date}</span>}
+              </div>
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 6 }}>
+                {p.profiles?.full_name ? `Assigned to ${p.profiles.full_name}` : 'Unassigned'}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <Btn small onClick={() => cycleStatus(p)}>Advance Status</Btn>
+              <Btn small danger onClick={() => deleteProperty(p.id)}>Delete</Btn>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  )
+}
+
 // ── Drivers Tab ────────────────────────────────────────────────────────────
 function DriversTab() {
   const [drivers, setDrivers] = useState([])
@@ -1212,11 +1362,17 @@ function AssignmentsTab() {
 export default function AdminApp() {
   const { profile, signOut } = useAuth()
   const [tab, setTab] = useState('routes')
+  const industry = profile?.companies?.industry
+  const isPropertyOnly = ['lawn', 'tree'].includes(industry)
+  const needsRoutes = !isPropertyOnly
+  const needsProperties = ['lawn', 'tree', 'delivery'].includes(industry)
   const tabs = [
-    { id: 'routes', label: 'Routes' },
+    ...(needsRoutes ? [{ id: 'routes', label: 'Routes' }] : []),
+    ...(needsProperties ? [{ id: 'properties', label: 'Properties' }] : []),
     { id: 'drivers', label: 'Team' },
-    { id: 'assignments', label: 'Assignments' },
+    ...(needsRoutes ? [{ id: 'assignments', label: 'Assignments' }] : []),
   ]
+  const activeTab = tabs.some(t => t.id === tab) ? tab : tabs[0]?.id
 
   return (
     <div style={{ minHeight: '100vh', background: '#0A0F1A', color: '#fff', fontFamily: "'DM Sans','Segoe UI',sans-serif" }}>
@@ -1232,13 +1388,14 @@ export default function AdminApp() {
       </div>
       <div style={{ borderBottom: '1px solid rgba(255,255,255,0.07)', padding: '0 24px', display: 'flex', gap: 4 }}>
         {tabs.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{ background: 'none', border: 'none', color: tab === t.id ? '#F59E0B' : 'rgba(255,255,255,0.35)', padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', borderBottom: tab === t.id ? '2px solid #F59E0B' : '2px solid transparent', marginBottom: -1, letterSpacing: 0.3 }}>{t.label}</button>
+          <button key={t.id} onClick={() => setTab(t.id)} style={{ background: 'none', border: 'none', color: activeTab === t.id ? '#F59E0B' : 'rgba(255,255,255,0.35)', padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', borderBottom: activeTab === t.id ? '2px solid #F59E0B' : '2px solid transparent', marginBottom: -1, letterSpacing: 0.3 }}>{t.label}</button>
         ))}
       </div>
       <div style={{ maxWidth: 800, margin: '0 auto', padding: '24px' }}>
-        {tab === 'routes' && <RoutesTab/>}
-        {tab === 'drivers' && <DriversTab/>}
-        {tab === 'assignments' && <AssignmentsTab/>}
+        {activeTab === 'routes' && <RoutesTab/>}
+        {activeTab === 'properties' && <PropertiesTab/>}
+        {activeTab === 'drivers' && <DriversTab/>}
+        {activeTab === 'assignments' && <AssignmentsTab/>}
       </div>
     </div>
   )
