@@ -55,7 +55,7 @@ export default function LoginPage() {
             Task<span style={{ color: '#F59E0B' }}>Path</span>
           </div>
           <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', letterSpacing: 1.5 }}>
-            STREET SWEEP OPS
+            FIELD SERVICE OPS
           </div>
         </div>
 

@@ -4,6 +4,7 @@ import { useAuth } from '../lib/AuthContext'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { addSatelliteTiles } from '../lib/mapTiles'
+import { getIndustryCopy } from '../lib/industryCopy'
 
 const STATUS_CONFIG = {
   pending:                { color: '#F59E0B', label: 'Pending' },
@@ -246,6 +247,7 @@ function SupervisorMap({ assignments, driverLocations, jobRecords }) {
 // ── Main SupervisorApp ─────────────────────────────────────────────────────
 export default function SupervisorApp() {
   const { profile, signOut } = useAuth()
+  const industryCopy = getIndustryCopy(profile?.companies?.industry)
   const [tab, setTab] = useState('live')
   const [assignments, setAssignments] = useState([])
   const [routes, setRoutes] = useState([])
@@ -272,7 +274,7 @@ export default function SupervisorApp() {
   // New route form
   const [showRouteForm, setShowRouteForm] = useState(false)
   const [routeForm, setRouteForm] = useState({ name: '', description: '', zone_id: '' })
-  const [variantForm, setVariantForm] = useState({ label: '', service_type: '', day_rule: 'weekday', color_code: '#F59E0B' })
+  const [variantForm, setVariantForm] = useState({ label: '', service_type: '', day_rule: 'weekday', color_code: '#F59E0B', passes_required: null })
   const [expandedRoute, setExpandedRoute] = useState(null)
   const [routeSaving, setRouteSaving] = useState(false)
   const [routeMsg, setRouteMsg] = useState(null)
@@ -371,8 +373,9 @@ export default function SupervisorApp() {
   }
 
   async function addVariant(routeId) {
-    const { error } = await supabase.from('schedule_variants').insert({ route_id: routeId, ...variantForm })
-    if (!error) { setVariantForm({ label: '', service_type: '', day_rule: 'weekday', color_code: '#F59E0B' }); loadAll() }
+    const passesRequired = variantForm.passes_required ?? industryCopy.passesRequired
+    const { error } = await supabase.from('schedule_variants').insert({ route_id: routeId, ...variantForm, passes_required: passesRequired })
+    if (!error) { setVariantForm({ label: '', service_type: '', day_rule: 'weekday', color_code: '#F59E0B', passes_required: null }); loadAll() }
   }
 
   async function deleteVariant(id) { await supabase.from('schedule_variants').delete().eq('id', id); loadAll() }
@@ -621,6 +624,7 @@ export default function SupervisorApp() {
                         <span style={{ fontSize: 12, fontWeight: 700, marginRight: 8 }}>{v.label}</span>
                         <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{v.service_type}</span>
                         <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginLeft: 8, fontFamily: 'monospace' }}>[{v.day_rule}]</span>
+                        <span style={{ fontSize: 10, color: 'rgba(245,158,11,0.7)', marginLeft: 8, fontFamily: 'monospace' }}>{v.passes_required}× pass{v.passes_required === 1 ? '' : 'es'}</span>
                       </div>
                       <Btn small danger onClick={() => deleteVariant(v.id)}>✕</Btn>
                     </div>
@@ -632,6 +636,7 @@ export default function SupervisorApp() {
                       {DAY_RULES.map(r => <option key={r} value={r}>{r}</option>)}
                     </Sel>
                     <Inp label="Color" type="color" value={variantForm.color_code} onChange={e => setVariantForm(f => ({ ...f, color_code: e.target.value }))} style={{ height: 42, padding: 4 }}/>
+                    <Inp label="Passes required" type="number" min={1} max={10} value={variantForm.passes_required ?? industryCopy.passesRequired} onChange={e => setVariantForm(f => ({ ...f, passes_required: Number(e.target.value) }))}/>
                   </div>
                   <Btn small onClick={() => addVariant(route.id)} disabled={!variantForm.label || !variantForm.service_type}>+ Add Variant</Btn>
                 </div>

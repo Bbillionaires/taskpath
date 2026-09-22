@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import RouteMap from '../components/RouteMap'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/AuthContext'
+import { getIndustryCopy } from '../lib/industryCopy'
 
 const VARIANT_COLORS = {
   weekday:  { bg: '#1E3A5F', border: '#3B82F6', text: '#93C5FD' },
@@ -113,6 +114,7 @@ function EditJobModal({ job, onClose, onSaved }) {
 
 export default function DriverApp() {
   const { profile, signOut } = useAuth()
+  const industryCopy = getIndustryCopy(profile?.companies?.industry)
   const [screen, setScreen] = useState('home')
   const [assignment, setAssignment] = useState(null)
   const [variant, setVariant] = useState(null)
@@ -120,6 +122,8 @@ export default function DriverApp() {
   const [jobStart, setJobStart] = useState(null)
   const [elapsed, setElapsed] = useState(0)
   const [coverage, setCoverage] = useState(0)
+  const [currentPass, setCurrentPass] = useState(1)
+  const passesRequired = variant?.passes_required ?? industryCopy.passesRequired
   const [records, setRecords] = useState([])
   const [loading, setLoading] = useState(true)
   const [editingJob, setEditingJob] = useState(null)
@@ -183,7 +187,7 @@ export default function DriverApp() {
     const today = new Date().toISOString().split('T')[0]
     const { data } = await supabase
       .from('assignments')
-      .select(`*, routes(id,name,description,geojson), schedule_variants!assignments_variant_id_fkey(id,label,service_type,day_rule,color_code)`)
+      .select(`*, routes(id,name,description,geojson), schedule_variants!assignments_variant_id_fkey(id,label,service_type,day_rule,color_code,passes_required)`)
       .eq('driver_id', profile.id)
       .eq('scheduled_date', today)
       .in('status', ['pending', 'in_progress'])
@@ -211,6 +215,7 @@ export default function DriverApp() {
   function startJob() {
     setJobStart(new Date())
     setJobActive(true)
+    setCurrentPass(1)
     gpsTrackRef.current = []
     timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000)
     supabase.from('assignments').update({ status: 'in_progress' }).eq('id', assignment.id)
@@ -218,6 +223,11 @@ export default function DriverApp() {
     if (pos) {
       supabase.from('job_records').update({ start_lat: pos.lat, start_lng: pos.lng }).eq('assignment_id', assignment.id)
     }
+  }
+
+  function finishPass() {
+    if (currentPass < passesRequired) { setCurrentPass(p => p + 1); return }
+    completeJob()
   }
 
   async function completeJob() {
@@ -229,6 +239,7 @@ export default function DriverApp() {
       route_id: assignment.route_id, variant_id: variant?.id,
       started_at: jobStart.toISOString(), completed_at: new Date().toISOString(),
       coverage_pct: coverage,
+      passes_completed: passesRequired,
       gps_track: { type: 'LineString', coordinates: track.map(p => [p.lng, p.lat]) },
       start_lat: track[0]?.lat ?? null,
       start_lng: track[0]?.lng ?? null,
@@ -299,7 +310,7 @@ export default function DriverApp() {
                 )}
                 <div style={{ display: 'flex', gap: 9 }}>
                   <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={() => setScreen('map')}>View Map →</button>
-                  {!jobActive && <button style={B('linear-gradient(135deg,#065F46,#059669)')} onClick={() => { setScreen('map'); startJob() }}>▶ Start Sweep</button>}
+                  {!jobActive && <button style={B('linear-gradient(135deg,#065F46,#059669)')} onClick={() => { setScreen('map'); startJob() }}>▶ {industryCopy.startLabel}</button>}
                 </div>
               </div>
               <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -339,7 +350,9 @@ export default function DriverApp() {
               {variant && <div style={{ marginTop: 4 }}><VariantBadge label={variant.label} dayRule={variant.day_rule}/></div>}
             </div>
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', letterSpacing: 1, marginBottom: 2 }}>{jobActive ? 'ELAPSED' : 'STATUS'}</div>
+              <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', letterSpacing: 1, marginBottom: 2 }}>
+                {jobActive ? (passesRequired > 1 ? `PASS ${currentPass}/${passesRequired}` : 'ELAPSED') : 'STATUS'}
+              </div>
               <div style={{ fontSize: 20, fontWeight: 800, fontFamily: 'monospace', color: '#F59E0B' }}>
                 {jobActive ? eStr : assignment ? 'READY' : '—'}
               </div>
@@ -350,7 +363,7 @@ export default function DriverApp() {
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
                 <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', letterSpacing: 1 }}>ROUTE COVERAGE</span>
-                <span style={{ fontSize: 11, fontWeight: 700, color: '#F59E0B', fontFamily: 'monospace' }}>{coverage}% swept</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#F59E0B', fontFamily: 'monospace' }}>{coverage}% {industryCopy.coverageLabel}</span>
               </div>
               <div style={{ height: 5, background: 'rgba(255,255,255,0.07)', borderRadius: 99, overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: `${coverage}%`, background: 'linear-gradient(90deg,#B45309,#F59E0B)', borderRadius: 99, transition: 'width 0.4s' }}/>
@@ -358,10 +371,12 @@ export default function DriverApp() {
             </div>
           )}
           <div style={{ display: 'flex', gap: 9, marginTop: 'auto' }}>
-            {!jobActive && assignment && <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={startJob}>▶ Start Sweep</button>}
+            {!jobActive && assignment && <button style={B('linear-gradient(135deg,#B45309,#F59E0B)')} onClick={startJob}>▶ {industryCopy.startLabel}</button>}
             {jobActive && (
               <>
-                <button style={B('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.55)')} onClick={completeJob}>✓ Mark Complete</button>
+                <button style={B('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.55)')} onClick={finishPass}>
+                  {currentPass < passesRequired ? `✓ Finish Pass ${currentPass}/${passesRequired}` : '✓ Mark Complete'}
+                </button>
                 <button style={{ ...B('rgba(239,68,68,0.12)', '#FCA5A5'), width: 'auto', padding: '15px 18px' }} onClick={() => { clearInterval(timerRef.current); setJobActive(false) }}>⏸</button>
               </>
             )}
