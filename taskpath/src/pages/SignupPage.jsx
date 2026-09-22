@@ -26,11 +26,14 @@ export default function SignupPage() {
     e.preventDefault()
     setLoading(true)
     setError(null)
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email, password,
       options: { data: { company_name: companyName, industry, full_name: fullName } },
     })
     if (error) setError(error.message)
+    // Email confirmations are off for this project, so signUp() already
+    // returns a live session — no need to make the new admin sign in again.
+    else if (data.session) navigate('/')
     else setDone(true)
     setLoading(false)
   }
