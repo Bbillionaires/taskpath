@@ -1173,6 +1173,141 @@ function PropertiesTab() {
   )
 }
 
+// ── Roofing Tab ────────────────────────────────────────────────────────────
+const ROOF_STATUS_COLORS = { pending: '#F59E0B', before_captured: '#3B82F6', completed: '#22C55E' }
+const ROOF_STATUS_LABELS = { pending: 'Pending', before_captured: 'Before captured', completed: 'Completed' }
+
+function RoofJobMap({ lat, lng }) {
+  const mapRef = useRef(null)
+  const mapInstanceRef = useRef(null)
+
+  useEffect(() => {
+    if (!mapRef.current || mapInstanceRef.current || lat == null || lng == null) return
+    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([lat, lng], 20)
+    addSatelliteTiles(map, { maxZoom: 21 })
+    L.circleMarker([lat, lng], { radius: 9, color: '#fff', weight: 2, fillColor: '#F59E0B', fillOpacity: 1 }).addTo(map)
+    mapInstanceRef.current = map
+    return () => { map.remove(); mapInstanceRef.current = null }
+  }, [lat, lng])
+
+  if (lat == null || lng == null) return null
+  return <div ref={mapRef} style={{ width: '100%', height: 220, borderRadius: 12, marginTop: 10 }}/>
+}
+
+function RoofingTab() {
+  const [jobs, setJobs] = useState([])
+  const [drivers, setDrivers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [expanded, setExpanded] = useState(null)
+  const [form, setForm] = useState({ address: '', assigned_to: '', notes: '' })
+
+  useEffect(() => { loadAll() }, [])
+
+  async function loadAll() {
+    setLoading(true)
+    const [{ data: j }, { data: d }] = await Promise.all([
+      supabase.from('roof_jobs').select('*, profiles!roof_jobs_assigned_to_fkey(full_name)').order('created_at', { ascending: false }),
+      supabase.from('profiles').select('id, full_name').eq('role', 'driver').order('full_name'),
+    ])
+    setJobs(j ?? [])
+    setDrivers(d ?? [])
+    setLoading(false)
+  }
+
+  async function saveJob() {
+    if (!form.address.trim()) return
+    setSaving(true)
+    setMsg({ type: 'info', text: 'Looking up address…' })
+    const geo = await geocodeAddress(form.address)
+    if (!geo) setMsg({ type: 'error', text: 'Could not find that address. Job saved without map coordinates — you can edit it later.' })
+    const { error } = await supabase.from('roof_jobs').insert({
+      address: form.address, assigned_to: form.assigned_to || null,
+      notes: form.notes || null, lat: geo?.lat ?? null, lng: geo?.lng ?? null,
+    })
+    if (error) setMsg({ type: 'error', text: error.message })
+    else if (geo) setMsg({ type: 'success', text: 'Roof job added!' })
+    setForm({ address: '', assigned_to: '', notes: '' })
+    setShowForm(false)
+    setSaving(false)
+    await loadAll()
+    setTimeout(() => setMsg(null), 4000)
+  }
+
+  async function captureBefore(job) {
+    await supabase.from('roof_jobs').update({ status: 'before_captured', before_captured_at: new Date().toISOString() }).eq('id', job.id)
+    loadAll()
+  }
+
+  async function captureAfter(job) {
+    await supabase.from('roof_jobs').update({ status: 'completed', after_captured_at: new Date().toISOString() }).eq('id', job.id)
+    loadAll()
+  }
+
+  async function deleteJob(id) { await supabase.from('roof_jobs').delete().eq('id', id); loadAll() }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <SectionTitle>ROOF JOBS ({jobs.length})</SectionTitle>
+        <Btn small onClick={() => setShowForm(!showForm)}>{showForm ? 'Cancel' : '+ New Roof Job'}</Btn>
+      </div>
+      {msg && <div style={{ background: msg.type === 'error' ? 'rgba(239,68,68,0.1)' : msg.type === 'success' ? 'rgba(34,197,94,0.1)' : 'rgba(59,130,246,0.1)', border: `1px solid ${msg.type === 'error' ? 'rgba(239,68,68,0.3)' : msg.type === 'success' ? 'rgba(34,197,94,0.3)' : 'rgba(59,130,246,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: msg.type === 'error' ? '#FCA5A5' : msg.type === 'success' ? '#86EFAC' : '#93C5FD' }}>{msg.text}</div>}
+      {showForm && (
+        <Card>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Inp label="Address" placeholder="e.g. 123 Main St, San Ramon, CA" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))}/>
+            <Sel label="Assign to (optional)" value={form.assigned_to} onChange={e => setForm(f => ({ ...f, assigned_to: e.target.value }))}>
+              <option value="">Unassigned</option>
+              {drivers.map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+            </Sel>
+            <Inp label="Notes (optional)" value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}/>
+            <Btn onClick={saveJob} disabled={!form.address.trim() || saving}>{saving ? 'Saving…' : 'Add Roof Job'}</Btn>
+          </div>
+        </Card>
+      )}
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>Loading roof jobs…</div>
+      ) : jobs.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>No roof jobs yet.</div>
+      ) : jobs.map(j => (
+        <Card key={j.id}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{j.address}</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Badge label={ROOF_STATUS_LABELS[j.status]} color={ROOF_STATUS_COLORS[j.status]}/>
+                {j.profiles?.full_name && <Badge label={j.profiles.full_name} color="#3B82F6"/>}
+              </div>
+            </div>
+            <Btn small onClick={() => setExpanded(expanded === j.id ? null : j.id)}>{expanded === j.id ? 'Close' : 'Manage'}</Btn>
+          </div>
+          {expanded === j.id && (
+            <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 14, marginTop: 8 }}>
+              <RoofJobMap lat={j.lat} lng={j.lng}/>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                <Btn small onClick={() => captureBefore(j)} disabled={j.status !== 'pending'}>
+                  {j.before_captured_at ? '✓ Before Captured' : 'Capture Before View'}
+                </Btn>
+                <Btn small onClick={() => captureAfter(j)} disabled={j.status !== 'before_captured'}>
+                  {j.after_captured_at ? '✓ After Captured' : 'Capture After View'}
+                </Btn>
+                <Btn small danger onClick={() => deleteJob(j.id)}>Delete</Btn>
+              </div>
+              <div style={{ marginTop: 12, background: 'rgba(255,255,255,0.03)', border: '1px dashed rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 14px' }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.5)', marginBottom: 2 }}>🛰️ HD Aerial Capture — Coming Soon</div>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>Premium on-demand satellite imagery, billed per capture. The views above use the same free satellite map as the rest of TaskPath.</div>
+              </div>
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
+  )
+}
+
 // ── Drivers Tab ────────────────────────────────────────────────────────────
 function DriversTab() {
   const [drivers, setDrivers] = useState([])
@@ -1363,12 +1498,13 @@ export default function AdminApp() {
   const { profile, signOut } = useAuth()
   const [tab, setTab] = useState('routes')
   const industry = profile?.companies?.industry
-  const isPropertyOnly = ['lawn', 'tree'].includes(industry)
-  const needsRoutes = !isPropertyOnly
+  const needsRoutes = !industry || ['sweeper', 'trash', 'delivery'].includes(industry)
   const needsProperties = ['lawn', 'tree', 'delivery'].includes(industry)
+  const needsRoofing = industry === 'roofing'
   const tabs = [
     ...(needsRoutes ? [{ id: 'routes', label: 'Routes' }] : []),
     ...(needsProperties ? [{ id: 'properties', label: 'Properties' }] : []),
+    ...(needsRoofing ? [{ id: 'roofing', label: 'Roofing' }] : []),
     { id: 'drivers', label: 'Team' },
     ...(needsRoutes ? [{ id: 'assignments', label: 'Assignments' }] : []),
   ]
@@ -1394,6 +1530,7 @@ export default function AdminApp() {
       <div style={{ maxWidth: 800, margin: '0 auto', padding: '24px' }}>
         {activeTab === 'routes' && <RoutesTab/>}
         {activeTab === 'properties' && <PropertiesTab/>}
+        {activeTab === 'roofing' && <RoofingTab/>}
         {activeTab === 'drivers' && <DriversTab/>}
         {activeTab === 'assignments' && <AssignmentsTab/>}
       </div>

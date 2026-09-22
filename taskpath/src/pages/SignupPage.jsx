@@ -8,7 +8,7 @@ const INDUSTRIES = [
   { value: 'lawn', label: 'Lawn Care' },
   { value: 'tree', label: 'Tree Service' },
   { value: 'delivery', label: 'Delivery' },
-  { value: 'roofing', label: 'Roofing (coming soon)' },
+  { value: 'roofing', label: 'Roofing' },
 ]
 
 export default function SignupPage() {

@@ -9,6 +9,8 @@ import { geocodeAddress } from '../lib/geocode'
 
 const PROPERTY_STATUS_COLORS = { pending: '#F59E0B', in_progress: '#3B82F6', completed: '#22C55E', skipped: '#6B7280' }
 const PROPERTY_STATUSES = ['pending', 'in_progress', 'completed', 'skipped']
+const ROOF_STATUS_COLORS = { pending: '#F59E0B', before_captured: '#3B82F6', completed: '#22C55E' }
+const ROOF_STATUS_LABELS = { pending: 'Pending', before_captured: 'Before captured', completed: 'Completed' }
 
 const STATUS_CONFIG = {
   pending:                { color: '#F59E0B', label: 'Pending' },
@@ -261,6 +263,23 @@ function SupervisorMap({ assignments, driverLocations, jobRecords, properties = 
   return <div ref={mapRef} style={{ width: '100%', height: '100%', borderRadius: 12 }} />
 }
 
+function RoofJobMap({ lat, lng }) {
+  const mapRef = useRef(null)
+  const mapInstanceRef = useRef(null)
+
+  useEffect(() => {
+    if (!mapRef.current || mapInstanceRef.current || lat == null || lng == null) return
+    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView([lat, lng], 20)
+    addSatelliteTiles(map, { maxZoom: 21 })
+    L.circleMarker([lat, lng], { radius: 9, color: '#fff', weight: 2, fillColor: '#F59E0B', fillOpacity: 1 }).addTo(map)
+    mapInstanceRef.current = map
+    return () => { map.remove(); mapInstanceRef.current = null }
+  }, [lat, lng])
+
+  if (lat == null || lng == null) return null
+  return <div ref={mapRef} style={{ width: '100%', height: 220, borderRadius: 12, marginTop: 10 }}/>
+}
+
 // ── Main SupervisorApp ─────────────────────────────────────────────────────
 export default function SupervisorApp() {
   const { profile, signOut } = useAuth()
@@ -303,6 +322,14 @@ export default function SupervisorApp() {
   const [propertySaving, setPropertySaving] = useState(false)
   const [propertyMsg, setPropertyMsg] = useState(null)
 
+  // Roofing
+  const [roofJobs, setRoofJobs] = useState([])
+  const [showRoofForm, setShowRoofForm] = useState(false)
+  const [roofForm, setRoofForm] = useState({ address: '', assigned_to: '', notes: '' })
+  const [roofSaving, setRoofSaving] = useState(false)
+  const [roofMsg, setRoofMsg] = useState(null)
+  const [expandedRoofJob, setExpandedRoofJob] = useState(null)
+
   // New team user form
   const [showAddUser, setShowAddUser] = useState(false)
   const [addForm, setAddForm] = useState({ full_name: '', email: '', password: '', role: 'driver' })
@@ -338,7 +365,7 @@ export default function SupervisorApp() {
   async function loadAll() {
     setLoading(true)
     const today = new Date().toISOString().split('T')[0]
-    const [{ data: a }, { data: r }, { data: z }, { data: d }, { data: jr }, { data: je }, { data: p }] = await Promise.all([
+    const [{ data: a }, { data: r }, { data: z }, { data: d }, { data: jr }, { data: je }, { data: p }, { data: rj }] = await Promise.all([
       supabase.from('assignments').select('*, profiles!assignments_driver_id_fkey(id,full_name,role), routes(id,name,geojson), schedule_variants(label,day_rule)').eq('scheduled_date', today).order('created_at', { ascending: false }),
       supabase.from('routes').select('*, zones(name), schedule_variants(*)').order('created_at', { ascending: false }),
       supabase.from('zones').select('*').order('name'),
@@ -346,6 +373,7 @@ export default function SupervisorApp() {
       supabase.from('job_records').select('*, routes(name), profiles(full_name)').gte('started_at', new Date(Date.now() - 24 * 3600 * 1000).toISOString()).order('started_at', { ascending: false }),
       supabase.from('job_edits').select('*, profiles(full_name), job_records(*)').order('created_at', { ascending: false }).limit(100),
       supabase.from('properties').select('*, zones(name), profiles!properties_assigned_to_fkey(full_name)').order('scheduled_date', { ascending: false }).order('created_at', { ascending: false }),
+      supabase.from('roof_jobs').select('*, profiles!roof_jobs_assigned_to_fkey(full_name)').order('created_at', { ascending: false }),
     ])
     setAssignments(a ?? [])
     setRoutes(r ?? [])
@@ -354,6 +382,7 @@ export default function SupervisorApp() {
     setJobRecords(jr ?? [])
     setJobEdits(je ?? [])
     setProperties(p ?? [])
+    setRoofJobs(rj ?? [])
     const forms = {}
     ;(d ?? []).forEach(dr => {
       forms[dr.id] = { vehicle_tag: dr.vehicle_tag ?? '', insurance_policy: dr.insurance_policy ?? '', vehicle_make_model: dr.vehicle_make_model ?? '', vehicle_owner: dr.vehicle_owner ?? '', vehicle_company: dr.vehicle_company ?? '', scheduled_hours: dr.scheduled_hours ?? '', pay_rate: dr.pay_rate ?? '', notes: dr.notes ?? '' }
@@ -400,6 +429,37 @@ export default function SupervisorApp() {
   }
 
   async function deleteProperty(id) { await supabase.from('properties').delete().eq('id', id); loadAll() }
+
+  async function saveRoofJob() {
+    if (!roofForm.address.trim()) return
+    setRoofSaving(true)
+    setRoofMsg({ type: 'info', text: 'Looking up address…' })
+    const geo = await geocodeAddress(roofForm.address)
+    if (!geo) setRoofMsg({ type: 'error', text: 'Could not find that address. Job saved without map coordinates — you can edit it later.' })
+    const { error } = await supabase.from('roof_jobs').insert({
+      address: roofForm.address, assigned_to: roofForm.assigned_to || null,
+      notes: roofForm.notes || null, lat: geo?.lat ?? null, lng: geo?.lng ?? null,
+    })
+    if (error) setRoofMsg({ type: 'error', text: error.message })
+    else if (geo) setRoofMsg({ type: 'success', text: 'Roof job added!' })
+    setRoofForm({ address: '', assigned_to: '', notes: '' })
+    setShowRoofForm(false)
+    setRoofSaving(false)
+    await loadAll()
+    setTimeout(() => setRoofMsg(null), 4000)
+  }
+
+  async function captureRoofBefore(job) {
+    await supabase.from('roof_jobs').update({ status: 'before_captured', before_captured_at: new Date().toISOString() }).eq('id', job.id)
+    loadAll()
+  }
+
+  async function captureRoofAfter(job) {
+    await supabase.from('roof_jobs').update({ status: 'completed', after_captured_at: new Date().toISOString() }).eq('id', job.id)
+    loadAll()
+  }
+
+  async function deleteRoofJob(id) { await supabase.from('roof_jobs').delete().eq('id', id); loadAll() }
 
   async function saveDriverProfile(driverId) {
     setSavingProfile(driverId)
@@ -486,14 +546,15 @@ export default function SupervisorApp() {
   if (tracingRoute) return <RouteTracer route={tracingRoute} onClose={() => setTracingRoute(null)} onSaved={loadAll} />
 
   const industry = profile?.companies?.industry
-  const isPropertyOnly = ['lawn', 'tree'].includes(industry)
-  const needsRoutes = !isPropertyOnly
+  const needsRoutes = !industry || ['sweeper', 'trash', 'delivery'].includes(industry)
   const needsProperties = ['lawn', 'tree', 'delivery'].includes(industry)
+  const needsRoofing = industry === 'roofing'
   const allTabs = [
     { id: 'live', label: 'Live Map' },
     ...(needsRoutes ? [{ id: 'assignments', label: 'Assignments' }] : []),
     ...(needsRoutes ? [{ id: 'routes', label: 'Routes' }] : []),
     ...(needsProperties ? [{ id: 'properties', label: 'Properties' }] : []),
+    ...(needsRoofing ? [{ id: 'roofing', label: 'Roofing' }] : []),
     { id: 'drivers', label: 'Drivers' },
     { id: 'team', label: 'Team' },
     { id: 'editlog', label: 'Edit Log' },
@@ -754,6 +815,64 @@ export default function SupervisorApp() {
                   <Btn small danger onClick={() => deleteProperty(p.id)}>Delete</Btn>
                 </div>
               </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* ROOFING TAB */}
+      {tab === 'roofing' && (
+        <div style={{ maxWidth: 800, margin: '0 auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace', letterSpacing: 1.5 }}>ROOF JOBS ({roofJobs.length})</div>
+            <Btn small onClick={() => setShowRoofForm(!showRoofForm)}>{showRoofForm ? 'Cancel' : '+ New Roof Job'}</Btn>
+          </div>
+          {roofMsg && <div style={{ background: roofMsg.type === 'error' ? 'rgba(239,68,68,0.1)' : roofMsg.type === 'success' ? 'rgba(34,197,94,0.1)' : 'rgba(59,130,246,0.1)', border: `1px solid ${roofMsg.type === 'error' ? 'rgba(239,68,68,0.3)' : roofMsg.type === 'success' ? 'rgba(34,197,94,0.3)' : 'rgba(59,130,246,0.3)'}`, borderRadius: 10, padding: '10px 14px', fontSize: 12, color: roofMsg.type === 'error' ? '#FCA5A5' : roofMsg.type === 'success' ? '#86EFAC' : '#93C5FD' }}>{roofMsg.text}</div>}
+          {showRoofForm && (
+            <Card>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Inp label="Address" placeholder="e.g. 123 Main St, San Ramon, CA" value={roofForm.address} onChange={e => setRoofForm(f => ({ ...f, address: e.target.value }))}/>
+                <Sel label="Assign to (optional)" value={roofForm.assigned_to} onChange={e => setRoofForm(f => ({ ...f, assigned_to: e.target.value }))}>
+                  <option value="">Unassigned</option>
+                  {drivers.filter(d => d.role === 'driver').map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+                </Sel>
+                <Inp label="Notes (optional)" value={roofForm.notes} onChange={e => setRoofForm(f => ({ ...f, notes: e.target.value }))}/>
+                <Btn onClick={saveRoofJob} disabled={!roofForm.address.trim() || roofSaving}>{roofSaving ? 'Saving…' : 'Add Roof Job'}</Btn>
+              </div>
+            </Card>
+          )}
+          {roofJobs.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>No roof jobs yet.</div>
+          ) : roofJobs.map(j => (
+            <Card key={j.id}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{j.address}</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <Badge label={ROOF_STATUS_LABELS[j.status]} color={ROOF_STATUS_COLORS[j.status]}/>
+                    {j.profiles?.full_name && <Badge label={j.profiles.full_name} color="#3B82F6"/>}
+                  </div>
+                </div>
+                <Btn small onClick={() => setExpandedRoofJob(expandedRoofJob === j.id ? null : j.id)}>{expandedRoofJob === j.id ? 'Close' : 'Manage'}</Btn>
+              </div>
+              {expandedRoofJob === j.id && (
+                <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 14, marginTop: 8 }}>
+                  <RoofJobMap lat={j.lat} lng={j.lng}/>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                    <Btn small onClick={() => captureRoofBefore(j)} disabled={j.status !== 'pending'}>
+                      {j.before_captured_at ? '✓ Before Captured' : 'Capture Before View'}
+                    </Btn>
+                    <Btn small onClick={() => captureRoofAfter(j)} disabled={j.status !== 'before_captured'}>
+                      {j.after_captured_at ? '✓ After Captured' : 'Capture After View'}
+                    </Btn>
+                    <Btn small danger onClick={() => deleteRoofJob(j.id)}>Delete</Btn>
+                  </div>
+                  <div style={{ marginTop: 12, background: 'rgba(255,255,255,0.03)', border: '1px dashed rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 14px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.5)', marginBottom: 2 }}>🛰️ HD Aerial Capture — Coming Soon</div>
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>Premium on-demand satellite imagery, billed per capture. The views above use the same free satellite map as the rest of TaskPath.</div>
+                  </div>
+                </div>
+              )}
             </Card>
           ))}
         </div>
