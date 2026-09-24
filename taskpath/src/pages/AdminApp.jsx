@@ -6,6 +6,7 @@ import 'leaflet/dist/leaflet.css'
 import { addSatelliteTiles } from '../lib/mapTiles'
 import { getIndustryCopy } from '../lib/industryCopy'
 import { geocodeAddress } from '../lib/geocode'
+import { startCheckout, openBillingPortal, trialDaysLeft, reportRoofCaptureUsage } from '../lib/billing'
 import * as pdfjsLib from 'pdfjs-dist'
 import { createWorker } from 'tesseract.js'
 
@@ -1195,6 +1196,8 @@ function RoofJobMap({ lat, lng }) {
 }
 
 function RoofingTab() {
+  const { profile } = useAuth()
+  const billingActive = Boolean(profile?.companies?.stripe_roofing_item_id)
   const [jobs, setJobs] = useState([])
   const [drivers, setDrivers] = useState([])
   const [loading, setLoading] = useState(true)
@@ -1238,11 +1241,19 @@ function RoofingTab() {
 
   async function captureBefore(job) {
     await supabase.from('roof_jobs').update({ status: 'before_captured', before_captured_at: new Date().toISOString() }).eq('id', job.id)
+    if (billingActive) {
+      const result = await reportRoofCaptureUsage()
+      if (!result.ok) setMsg({ type: 'error', text: `Capture saved, but billing wasn't recorded: ${result.error}` })
+    }
     loadAll()
   }
 
   async function captureAfter(job) {
     await supabase.from('roof_jobs').update({ status: 'completed', after_captured_at: new Date().toISOString() }).eq('id', job.id)
+    if (billingActive) {
+      const result = await reportRoofCaptureUsage()
+      if (!result.ok) setMsg({ type: 'error', text: `Capture saved, but billing wasn't recorded: ${result.error}` })
+    }
     loadAll()
   }
 
@@ -1297,13 +1308,76 @@ function RoofingTab() {
                 <Btn small danger onClick={() => deleteJob(j.id)}>Delete</Btn>
               </div>
               <div style={{ marginTop: 12, background: 'rgba(255,255,255,0.03)', border: '1px dashed rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.5)', marginBottom: 2 }}>🛰️ HD Aerial Capture — Coming Soon</div>
-                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>Premium on-demand satellite imagery, billed per capture. The views above use the same free satellite map as the rest of TaskPath.</div>
+                {billingActive ? (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#86EFAC', marginBottom: 2 }}>✓ Per-capture billing active</div>
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>Each capture above reports a billable usage event to your subscription. The imagery itself is still the same free satellite map as the rest of TaskPath — HD aerial imagery is a separate upgrade, coming soon.</div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.5)', marginBottom: 2 }}>🛰️ Per-capture billing not active</div>
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>Subscribe from the Billing tab to enable per-capture billing for roof jobs. Captures above still work today using the same free satellite map as the rest of TaskPath.</div>
+                  </>
+                )}
               </div>
             </div>
           )}
         </Card>
       ))}
+    </div>
+  )
+}
+
+// ── Billing Tab ────────────────────────────────────────────────────────────
+const SUBSCRIPTION_STATUS_COLORS = { trialing: '#F59E0B', active: '#22C55E', past_due: '#F59E0B', canceled: '#EF4444', incomplete: '#EF4444' }
+
+function BillingTab() {
+  const { profile } = useAuth()
+  const company = profile?.companies
+  const [loading, setLoading] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const isSubscribed = Boolean(company?.subscription_status === 'active')
+  const daysLeft = trialDaysLeft(company)
+
+  async function handleSubscribe() {
+    setLoading(true)
+    setMsg(null)
+    try { await startCheckout() } catch (e) { setMsg({ type: 'error', text: e.message }); setLoading(false) }
+  }
+
+  async function handleManage() {
+    setLoading(true)
+    setMsg(null)
+    try { await openBillingPortal() } catch (e) { setMsg({ type: 'error', text: e.message }); setLoading(false) }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <SectionTitle>BILLING</SectionTitle>
+      {msg && <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 10, padding: '10px 14px', fontSize: 12, color: '#FCA5A5' }}>{msg.text}</div>}
+      <Card>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 4 }}>SUBSCRIPTION STATUS</div>
+            <Badge label={company?.subscription_status ?? 'unknown'} color={SUBSCRIPTION_STATUS_COLORS[company?.subscription_status] ?? '#888'}/>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 4 }}>SEATS</div>
+            <div style={{ fontSize: 20, fontWeight: 800, fontFamily: 'monospace' }}>{company?.seat_count ?? 1}</div>
+          </div>
+        </div>
+        {company?.subscription_status === 'trialing' && daysLeft != null && (
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginBottom: 12 }}>
+            {daysLeft > 0 ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} left in your free trial.` : 'Your free trial ends today.'}
+          </div>
+        )}
+        <Btn onClick={isSubscribed ? handleManage : handleSubscribe} disabled={loading}>
+          {loading ? 'Loading…' : isSubscribed ? 'Manage Billing' : 'Subscribe Now'}
+        </Btn>
+      </Card>
+      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
+        Billing is priced as a flat monthly fee plus a per-seat charge for each team member.
+      </div>
     </div>
   )
 }
@@ -1507,6 +1581,7 @@ export default function AdminApp() {
     ...(needsRoofing ? [{ id: 'roofing', label: 'Roofing' }] : []),
     { id: 'drivers', label: 'Team' },
     ...(needsRoutes ? [{ id: 'assignments', label: 'Assignments' }] : []),
+    { id: 'billing', label: 'Billing' },
   ]
   const activeTab = tabs.some(t => t.id === tab) ? tab : tabs[0]?.id
 
@@ -1533,6 +1608,7 @@ export default function AdminApp() {
         {activeTab === 'roofing' && <RoofingTab/>}
         {activeTab === 'drivers' && <DriversTab/>}
         {activeTab === 'assignments' && <AssignmentsTab/>}
+        {activeTab === 'billing' && <BillingTab/>}
       </div>
     </div>
   )

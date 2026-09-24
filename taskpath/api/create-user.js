@@ -1,30 +1,11 @@
+import { verifyCaller, isAdminOrSupervisor, supabaseServiceFetch } from './_lib/auth.js'
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
 
-  const authHeader = req.headers.authorization ?? ''
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
-  if (!token) return res.status(401).json({ error: 'Missing Authorization header' })
-
-  const callerRes = await fetch(`${process.env.VITE_SUPABASE_URL}/auth/v1/user`, {
-    headers: {
-      'apikey': process.env.VITE_SUPABASE_SERVICE_ROLE_KEY,
-      'Authorization': `Bearer ${token}`,
-    },
-  })
-  if (!callerRes.ok) return res.status(401).json({ error: 'Invalid or expired session' })
-  const caller = await callerRes.json()
-
-  const profileRes = await fetch(
-    `${process.env.VITE_SUPABASE_URL}/rest/v1/profiles?auth_user_id=eq.${caller.id}&select=role,company_id`,
-    {
-      headers: {
-        'apikey': process.env.VITE_SUPABASE_SERVICE_ROLE_KEY,
-        'Authorization': `Bearer ${process.env.VITE_SUPABASE_SERVICE_ROLE_KEY}`,
-      },
-    }
-  )
-  const [callerProfile] = await profileRes.json()
-  if (!callerProfile || !['admin', 'supervisor'].includes(callerProfile.role)) {
+  const { profile: callerProfile, error } = await verifyCaller(req)
+  if (error) return res.status(error.status).json({ error: error.message })
+  if (!isAdminOrSupervisor(callerProfile)) {
     return res.status(403).json({ error: 'Only admins and supervisors can create team members' })
   }
 
@@ -52,19 +33,21 @@ export default async function handler(req, res) {
   if (!response.ok) return res.status(400).json({ error: data.message ?? data.msg ?? data.error_description ?? JSON.stringify(data) })
 
   // Update profile
-  await fetch(
-    `${process.env.VITE_SUPABASE_URL}/rest/v1/profiles?auth_user_id=eq.${data.id}`,
-    {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': process.env.VITE_SUPABASE_SERVICE_ROLE_KEY,
-        'Authorization': `Bearer ${process.env.VITE_SUPABASE_SERVICE_ROLE_KEY}`,
-        'Prefer': 'return=representation',
-      },
-      body: JSON.stringify({ full_name, role, assigned_zone_id: zone_id || null }),
-    }
-  )
+  await supabaseServiceFetch(`/rest/v1/profiles?auth_user_id=eq.${data.id}`, {
+    method: 'PATCH',
+    headers: { 'Prefer': 'return=representation' },
+    body: JSON.stringify({ full_name, role, assigned_zone_id: zone_id || null }),
+  })
+
+  // Best-effort: keep the Stripe subscription's seat quantity in sync. Billing
+  // may not be configured yet (no Stripe account), or the company may still be
+  // on trial with no subscription created — neither should ever block an invite.
+  try {
+    const { syncSeatQuantity } = await import('./_lib/stripe.js')
+    await syncSeatQuantity(callerProfile.company_id)
+  } catch (e) {
+    console.error('Seat sync failed (non-blocking):', e.message)
+  }
 
   return res.status(200).json({ success: true, user_id: data.id })
 }
